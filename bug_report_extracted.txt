@@ -1,0 +1,94 @@
+﻿NSE Filing Alerts Bot
+Bug Report & Fix Instructions
+Prepared for: Antigravity Team  |  Date: 29 May 2026
+Project Overview
+This project is a WhatsApp bot that monitors the National Stock Exchange (NSE) for new company filings and automatically delivers them as PDFs to subscribed users. It has two components:
+Node.js Scraper ΓÇö polls the NSE API, downloads PDFs, and stores records in PostgreSQL.
+Python Flask Bot ΓÇö WhatsApp webhook that reads from PostgreSQL and sends PDF notifications via the WhatsApp Cloud API.
+Bug #1 ΓÇö Company Symbol Not Saved in Database (Critical)
+What is happening
+Many filings are being downloaded and stored in the database, but the company_symbol column is empty/NULL. This means when the WhatsApp bot queries for a specific company (e.g. SBIN), it finds no records and sends nothing to the subscriber.
+Affected file
+nse-announcement-downloader/.env
+Symptom
+Rows in announcements table have empty company_symbol
+Impact
+Bot cannot match filings to subscribers ΓÇö no PDFs delivered
+Root Cause
+The SYMBOLS variable in the .env file has a duplicate SYMBOLS= key in the middle of the value:
+SYMBOLS=WOCKPHARMA,SYMBOLS=RELIANCE,TCS,INFY,...
+When Node.js splits this by comma, one of the tokens becomes the literal string SYMBOLS=RELIANCE. This gets passed to the NSE API as a symbol. The API returns data but the symbol value stored in the DB is wrong or empty, causing the filename and DB record to have no company prefix.
+Fix
+Step 1 ΓÇö Open the .env file at:
+d:\prathmesh\shares\nse-announcement-downloader\nse-announcement-downloader\.env
+Step 2 ΓÇö Change the first line from:
+SYMBOLS=WOCKPHARMA,SYMBOLS=RELIANCE,TCS,...
+To:
+SYMBOLS=WOCKPHARMA,RELIANCE,TCS,...
+(Remove the duplicate SYMBOLS= in the middle.)
+Step 3 ΓÇö Clean up broken records already in the database. Run this SQL in psql or pgAdmin:
+DELETE FROM announcements WHERE company_symbol IS NULL OR company_symbol = '' OR company_symbol LIKE 'SYMBOLS=%';
+Step 4 ΓÇö Restart the NSE Scraper window.
+Bug #2 ΓÇö Bot Sends Same PDF in an Infinite Loop
+What is happening
+The db_watcher background thread polls PostgreSQL every 60 seconds for new filings. When it finds a filing whose PDF file is not on disk (because the path is wrong), it skips marking it as sent. On the next poll, it finds the same filing again and attempts to send it again ΓÇö indefinitely.
+Affected file
+d:\prathmesh\shares\db_watcher.py
+Symptom
+Same PDF sent repeatedly every 60 seconds
+Impact
+Spam to all subscribers, wasted WhatsApp API calls
+Root Cause
+In db_watcher.py, the file-not-found block used continue without marking the filing as sent:
+if not os.path.exists(file_path):
+    print(f'File not found: {file_path}')
+    continue   # ΓåÉ never marks as sent, loops forever
+Fix
+Replace the file-not-found block with one that marks the filing as sent to prevent re-processing:
+if not os.path.exists(file_path):
+    print(f'File not found: {file_path} ΓÇö marking to prevent loop.')
+    bot_db.mark_filing_sent(filing_id)
+    mark_notified_in_pg(filing_id)
+    continue
+The fixed db_watcher.py file is attached separately. Replace the existing file and restart the Python bot.
+Bug #3 ΓÇö database.py Function Signature Mismatch
+What is happening
+The is_filing_sent() function in database.py on disk has a different signature than what db_watcher.py expects, causing a runtime crash on every webhook call.
+Affected file
+d:\prathmesh\shares\database.py
+Error message
+is_filing_sent() missing 1 required positional argument: 'filing_id'
+Impact
+Bot crashes on every incoming WhatsApp message
+Root Cause
+The database.py file on disk was manually edited to accept two arguments (phone, filing_id), but the sent_filings table schema and mark_filing_sent() function were not updated to match. This creates an inconsistency that crashes at runtime.
+Fix
+Replace database.py with the correct version (attached separately) where:
+is_filing_sent(filing_id) takes only one argument
+mark_filing_sent(filing_id) is consistent with the table schema
+sent_filings table tracks by filing_id only (not per-phone)
+Also delete the __pycache__ folder after replacing the file:
+rmdir /s /q "d:\prathmesh\shares\__pycache__"
+Summary of All Fixes
+#
+File
+Problem
+Action Required
+1
+.env
+Duplicate SYMBOLS= key ΓÇö company_symbol empty in DB
+Remove duplicate SYMBOLS= from line 1, clean DB, restart scraper
+2
+db_watcher.py
+File-not-found skips mark_filing_sent ΓÇö infinite resend loop
+Replace with fixed db_watcher.py (attached), restart bot
+3
+database.py
+is_filing_sent() signature mismatch ΓÇö bot crashes on every message
+Replace with fixed database.py (attached), delete __pycache__, restart bot
+Correct Restart Order After All Fixes
+Delete d:\prathmesh\shares\__pycache__
+Run SQL to clean broken DB records (see Bug #1 fix above)
+Double-click start_all.bat ΓÇö all 4 windows open automatically
+Test webhook in browser to confirm ngrok is running
+Verify and Save webhook URL in Meta Developer Dashboard

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//tmp/NSE-subscription-website/**)",
+      "Read(//tmp/NSE-subscription-website/backend/**)",
+      "Read(//tmp/NSE-subscription-website/frontend/**)",
+      "Bash(cat /tmp/NSE-subscription-website/bot/Bot.py | head -50)",
+      "Read(//tmp/NSE-subscription-website/bot/**)"
+    ]
+  }
+}

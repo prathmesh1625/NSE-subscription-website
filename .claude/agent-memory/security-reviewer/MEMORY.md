@@ -1,0 +1,3 @@
+- [Platform Architecture](project_architecture.md) — EquityAlerts fintech WhatsApp notification platform; stack and components
+- [Confirmed & Missing Controls](project_security-controls.md) — what's verified present vs. assumed-absent as of latest review
+- [Code Not Yet Seen](project_unreviewed-surface.md) — components flagged for review but not yet shown

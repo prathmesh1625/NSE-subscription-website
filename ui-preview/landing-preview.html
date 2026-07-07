@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EquityAlerts — UI Redesign Preview (mockup, not live code)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#07090F;
+  --bg2:#0B0E16;
+  --card:#10141E;
+  --card2:#141927;
+  --border:#1E2535;
+  --border-soft:rgba(51,208,151,.18);
+  --mint:#33D097;
+  --mint2:#2DD4BF;
+  --cyan:#38BDF8;
+  --red:#F87171;
+  --text:#EDF0F4;
+  --sub:#98A0AE;
+  --muted:#646E7E;
+  --grad:linear-gradient(92deg,#33D097 0%,#2DD4BF 55%,#38BDF8 110%);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+::selection{background:rgba(51,208,151,.3)}
+::-webkit-scrollbar{width:10px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:#1E2535;border-radius:8px}
+::-webkit-scrollbar-thumb:hover{background:#2A3347}
+a{text-decoration:none;color:inherit}
+.display{font-family:'Space Grotesk','Inter',sans-serif}
+.mono{font-family:'JetBrains Mono',monospace}
+.wrap{max-width:1180px;margin:0 auto;padding:0 24px}
+
+/* ----- preview banner ----- */
+.preview-banner{position:fixed;bottom:18px;right:18px;z-index:99;background:#141927;border:1px solid var(--border);border-radius:12px;padding:10px 16px;font-size:11px;color:var(--sub);box-shadow:0 12px 40px rgba(0,0,0,.5);display:flex;align-items:center;gap:8px}
+.preview-banner b{color:var(--mint)}
+
+/* ----- aurora background ----- */
+.aurora{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
+.aurora::before{content:"";position:absolute;width:900px;height:900px;top:-380px;left:50%;transform:translateX(-50%);background:radial-gradient(circle,rgba(51,208,151,.13) 0%,rgba(45,212,191,.06) 38%,transparent 68%);filter:blur(40px);animation:drift 16s ease-in-out infinite alternate}
+.aurora::after{content:"";position:absolute;width:700px;height:700px;bottom:-300px;right:-200px;background:radial-gradient(circle,rgba(56,189,248,.08) 0%,transparent 65%);filter:blur(50px);animation:drift 20s ease-in-out infinite alternate-reverse}
+@keyframes drift{from{transform:translateX(-54%) translateY(0)}to{transform:translateX(-46%) translateY(40px)}}
+.grid-bg{position:fixed;inset:0;z-index:0;pointer-events:none;background-image:linear-gradient(rgba(30,37,53,.32) 1px,transparent 1px),linear-gradient(90deg,rgba(30,37,53,.32) 1px,transparent 1px);background-size:56px 56px;mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,black 30%,transparent 80%)}
+
+/* ----- ticker ----- */
+.ticker{position:relative;z-index:5;background:rgba(11,14,22,.9);border-bottom:1px solid var(--border);overflow:hidden;padding:8px 0;font-family:'JetBrains Mono',monospace;font-size:11px}
+.ticker-track{display:flex;gap:0;white-space:nowrap;animation:marquee 38s linear infinite;width:max-content}
+.ticker:hover .ticker-track{animation-play-state:paused}
+@keyframes marquee{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.tick{display:inline-flex;align-items:center;gap:7px;padding:0 22px;border-right:1px solid rgba(30,37,53,.6)}
+.tick b{color:var(--text);font-weight:700;letter-spacing:.5px}
+.tick .up{color:var(--mint)}
+.tick .down{color:var(--red)}
+
+/* ----- nav ----- */
+nav{position:sticky;top:0;z-index:50;background:rgba(7,9,15,.72);backdrop-filter:blur(18px);border-bottom:1px solid rgba(30,37,53,.7)}
+.nav-in{height:68px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:11px}
+.logo-mark{width:38px;height:38px;border-radius:11px;background:var(--grad);display:flex;align-items:center;justify-content:center;box-shadow:0 4px 24px rgba(51,208,151,.35)}
+.logo-mark svg{width:20px;height:20px}
+.logo span{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:18px;letter-spacing:-.3px}
+.nav-links{display:flex;gap:34px;font-size:13.5px;font-weight:600;color:var(--sub)}
+.nav-links a{position:relative;transition:color .2s}
+.nav-links a:hover{color:var(--text)}
+.nav-links a::after{content:"";position:absolute;left:0;bottom:-6px;width:0;height:2px;background:var(--grad);border-radius:2px;transition:width .25s}
+.nav-links a:hover::after{width:100%}
+.nav-cta{display:flex;align-items:center;gap:14px}
+.link-ghost{font-size:13.5px;font-weight:600;color:var(--sub);transition:color .2s}
+.link-ghost:hover{color:var(--text)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;font-family:'Inter',sans-serif;font-weight:700;font-size:13.5px;border-radius:12px;padding:0 22px;height:44px;cursor:pointer;border:none;transition:transform .18s,box-shadow .18s,background .18s;letter-spacing:.1px}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:var(--grad);color:#04130C;box-shadow:0 6px 28px rgba(51,208,151,.32)}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 10px 36px rgba(51,208,151,.45)}
+.btn-outline{background:transparent;color:var(--text);border:1px solid var(--border);}
+.btn-outline:hover{border-color:var(--mint);color:var(--mint);transform:translateY(-2px)}
+.btn-lg{height:52px;padding:0 30px;font-size:14.5px;border-radius:14px}
+
+/* ----- hero ----- */
+.hero{position:relative;z-index:5;padding:84px 0 40px;display:grid;grid-template-columns:1.12fr .88fr;gap:56px;align-items:center}
+.badge{display:inline-flex;align-items:center;gap:8px;background:rgba(51,208,151,.07);border:1px solid rgba(51,208,151,.22);color:var(--mint);font-size:12px;font-weight:700;padding:7px 14px;border-radius:99px;letter-spacing:.3px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--mint);box-shadow:0 0 0 0 rgba(51,208,151,.6);animation:pulse 1.8s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(51,208,151,.55)}70%{box-shadow:0 0 0 9px rgba(51,208,151,0)}100%{box-shadow:0 0 0 0 rgba(51,208,151,0)}}
+.hero h1{font-family:'Space Grotesk',sans-serif;font-size:clamp(38px,5vw,60px);line-height:1.06;letter-spacing:-1.8px;font-weight:700;margin:26px 0 22px}
+.grad-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p{color:var(--sub);font-size:16.5px;line-height:1.7;max-width:520px;font-weight:450}
+.hero-ctas{display:flex;gap:14px;margin-top:34px;flex-wrap:wrap}
+.hero-stats{display:flex;gap:44px;margin-top:46px;padding-top:30px;border-top:1px solid var(--border)}
+.stat .num{font-family:'Space Grotesk',sans-serif;font-size:30px;font-weight:700;letter-spacing:-1px}
+.stat .num em{font-style:normal;color:var(--mint)}
+.stat .lbl{font-size:12px;color:var(--muted);font-weight:600;margin-top:4px;letter-spacing:.3px;text-transform:uppercase}
+
+/* ----- phone mockup ----- */
+.phone-zone{position:relative;display:flex;justify-content:center}
+.phone{width:300px;border-radius:38px;background:#0D1119;border:1px solid #232C3F;box-shadow:0 40px 90px rgba(0,0,0,.6),0 0 80px rgba(51,208,151,.07);padding:12px;position:relative;z-index:2;animation:float 7s ease-in-out infinite}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-14px)}}
+.phone-screen{border-radius:28px;background:#0A0E0B;overflow:hidden;height:540px;display:flex;flex-direction:column}
+.wa-header{background:#15211B;padding:14px 16px;display:flex;align-items:center;gap:11px;border-bottom:1px solid rgba(51,208,151,.1)}
+.wa-avatar{width:36px;height:36px;border-radius:50%;background:var(--grad);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;color:#04130C}
+.wa-name{font-size:13.5px;font-weight:700}
+.wa-status{font-size:10.5px;color:var(--mint)}
+.wa-body{flex:1;padding:14px 12px;display:flex;flex-direction:column;gap:11px;background-image:radial-gradient(rgba(51,208,151,.04) 1px,transparent 1px);background-size:22px 22px;overflow:hidden}
+.wa-msg{background:#121E17;border:1px solid rgba(51,208,151,.12);border-radius:4px 14px 14px 14px;padding:11px 13px;max-width:94%;opacity:0;transform:translateY(14px);animation:msgIn .55s forwards}
+.wa-msg:nth-child(1){animation-delay:.4s}
+.wa-msg:nth-child(2){animation-delay:1.5s}
+.wa-msg:nth-child(3){animation-delay:2.6s}
+.wa-msg:nth-child(4){animation-delay:3.7s}
+@keyframes msgIn{to{opacity:1;transform:translateY(0)}}
+.wa-tag{display:inline-block;font-size:9px;font-weight:800;letter-spacing:.8px;padding:3px 8px;border-radius:5px;margin-bottom:7px;text-transform:uppercase}
+.t-earnings{background:rgba(51,208,151,.14);color:var(--mint)}
+.t-div{background:rgba(56,189,248,.14);color:var(--cyan)}
+.t-board{background:rgba(251,191,36,.14);color:#FBBF24}
+.t-acq{background:rgba(248,113,113,.14);color:var(--red)}
+.wa-msg b{font-size:12.5px;display:block;margin-bottom:3px}
+.wa-msg span{font-size:11px;color:var(--sub);line-height:1.5;display:block}
+.wa-time{font-size:9px;color:var(--muted);text-align:right;margin-top:6px}
+.float-card{position:absolute;background:rgba(16,20,30,.92);backdrop-filter:blur(10px);border:1px solid var(--border);border-radius:14px;padding:12px 16px;z-index:3;box-shadow:0 16px 50px rgba(0,0,0,.5)}
+.fc1{top:46px;left:-30px;animation:float 6s ease-in-out infinite .8s}
+.fc2{bottom:70px;right:-26px;animation:float 8s ease-in-out infinite .3s}
+.float-card .fc-l{font-size:9.5px;font-weight:800;color:var(--muted);letter-spacing:1px;text-transform:uppercase}
+.float-card .fc-v{font-family:'Space Grotesk',sans-serif;font-size:17px;font-weight:700;margin-top:3px}
+.float-card .fc-v.up{color:var(--mint)}
+
+/* ----- trust strip ----- */
+.trust{position:relative;z-index:5;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:rgba(11,14,22,.5);padding:22px 0;margin-top:60px}
+.trust-in{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap}
+.trust-item{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600;color:var(--sub)}
+.trust-item svg{width:17px;height:17px;flex-shrink:0}
+
+/* ----- sections ----- */
+section{position:relative;z-index:5}
+.sec{padding:96px 0}
+.sec-head{text-align:center;max-width:620px;margin:0 auto 60px}
+.kicker{display:inline-block;font-size:11.5px;font-weight:800;letter-spacing:2.2px;text-transform:uppercase;color:var(--mint);margin-bottom:16px}
+.sec-head h2{font-family:'Space Grotesk',sans-serif;font-size:clamp(28px,3.6vw,42px);font-weight:700;letter-spacing:-1.2px;line-height:1.12}
+.sec-head p{color:var(--sub);font-size:15.5px;margin-top:16px;line-height:1.65}
+
+/* reveal on scroll */
+.reveal{opacity:0;transform:translateY(28px);transition:opacity .7s cubic-bezier(.2,.7,.3,1),transform .7s cubic-bezier(.2,.7,.3,1)}
+.reveal.in{opacity:1;transform:none}
+
+/* ----- steps ----- */
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;position:relative}
+.step{background:var(--card);border:1px solid var(--border);border-radius:22px;padding:34px 30px;position:relative;transition:transform .3s,border-color .3s,box-shadow .3s}
+.step:hover{transform:translateY(-6px);border-color:var(--border-soft);box-shadow:0 24px 60px rgba(0,0,0,.45)}
+.step-num{font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:700;color:var(--mint);background:rgba(51,208,151,.08);border:1px solid rgba(51,208,151,.2);width:44px;height:44px;border-radius:13px;display:flex;align-items:center;justify-content:center;margin-bottom:22px}
+.step h3{font-family:'Space Grotesk',sans-serif;font-size:19px;font-weight:700;letter-spacing:-.4px;margin-bottom:10px}
+.step p{color:var(--sub);font-size:13.5px;line-height:1.65}
+.step-arrow{position:absolute;top:50%;right:-19px;transform:translateY(-50%);z-index:2;color:var(--mint);opacity:.6;font-size:18px}
+
+/* ----- features ----- */
+.feat-band{background:rgba(11,14,22,.55);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.feats{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.feat{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:28px;transition:transform .3s,border-color .3s;position:relative;overflow:hidden}
+.feat::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--grad);opacity:0;transition:opacity .3s}
+.feat:hover{transform:translateY(-5px);border-color:var(--border-soft)}
+.feat:hover::before{opacity:1}
+.feat-ic{width:42px;height:42px;border-radius:12px;background:rgba(51,208,151,.08);border:1px solid rgba(51,208,151,.16);display:flex;align-items:center;justify-content:center;margin-bottom:18px}
+.feat-ic svg{width:20px;height:20px}
+.feat h4{font-size:15.5px;font-weight:700;margin-bottom:8px;letter-spacing:-.2px}
+.feat p{color:var(--sub);font-size:13px;line-height:1.65}
+
+/* ----- monitor chips ----- */
+.chips{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.chip{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:17px 19px;display:flex;align-items:center;gap:11px;font-size:13.5px;font-weight:650;transition:border-color .25s,transform .25s;cursor:default}
+.chip:hover{border-color:var(--border-soft);transform:translateY(-3px)}
+.chip .ic{width:30px;height:30px;border-radius:9px;background:rgba(51,208,151,.08);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+
+/* ----- pricing ----- */
+.prices{display:grid;grid-template-columns:repeat(2,minmax(0,400px));gap:26px;justify-content:center;align-items:stretch}
+.price{background:var(--card);border:1px solid var(--border);border-radius:24px;padding:36px;display:flex;flex-direction:column;transition:transform .3s,box-shadow .3s;position:relative}
+.price:hover{transform:translateY(-6px)}
+.price.hot{background:linear-gradient(var(--card2),var(--card2)) padding-box,var(--grad) border-box;border:1.6px solid transparent;box-shadow:0 26px 80px rgba(51,208,151,.13)}
+.hot-badge{position:absolute;top:-14px;left:50%;transform:translateX(-50%);background:var(--grad);color:#04130C;font-size:10.5px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase;padding:7px 18px;border-radius:99px;box-shadow:0 6px 20px rgba(51,208,151,.4)}
+.price .tier{font-size:12px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:var(--sub)}
+.price.hot .tier{color:var(--mint)}
+.price .amount{font-family:'Space Grotesk',sans-serif;font-size:52px;font-weight:700;letter-spacing:-2px;margin:14px 0 4px}
+.price .amount small{font-size:14px;color:var(--muted);font-weight:600;letter-spacing:0;font-family:'Inter',sans-serif}
+.price .desc{font-size:13px;color:var(--sub);margin-bottom:26px;line-height:1.5}
+.price ul{list-style:none;display:flex;flex-direction:column;gap:13px;margin-bottom:32px;flex:1}
+.price li{display:flex;gap:11px;font-size:13.5px;color:var(--sub);font-weight:550;align-items:flex-start}
+.price li b{color:var(--text)}
+.price li svg{width:17px;height:17px;flex-shrink:0;margin-top:1px}
+
+/* ----- faq ----- */
+.faq{max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.faq-item{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden;transition:border-color .25s}
+.faq-item[open]{border-color:var(--border-soft)}
+.faq-item summary{padding:20px 24px;font-size:14.5px;font-weight:700;cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:14px}
+.faq-item summary::-webkit-details-marker{display:none}
+.faq-item summary::after{content:"+";font-size:21px;color:var(--mint);font-weight:400;transition:transform .25s}
+.faq-item[open] summary::after{transform:rotate(45deg)}
+.faq-item .ans{padding:0 24px 22px;font-size:13.5px;color:var(--sub);line-height:1.7}
+
+/* ----- final cta ----- */
+.cta-card{position:relative;border-radius:28px;padding:74px 40px;text-align:center;overflow:hidden;background:var(--card);border:1px solid var(--border)}
+.cta-card::before{content:"";position:absolute;width:560px;height:560px;left:50%;top:50%;transform:translate(-50%,-50%);background:radial-gradient(circle,rgba(51,208,151,.16) 0%,transparent 65%);pointer-events:none}
+.cta-card h2{font-family:'Space Grotesk',sans-serif;font-size:clamp(30px,4vw,46px);font-weight:700;letter-spacing:-1.4px;position:relative}
+.cta-card p{color:var(--sub);font-size:15.5px;margin:18px auto 34px;max-width:460px;line-height:1.65;position:relative}
+.cta-card .hero-ctas{justify-content:center;margin-top:0;position:relative}
+
+/* ----- footer ----- */
+footer{border-top:1px solid var(--border);background:rgba(7,9,15,.85);padding:60px 0 32px;position:relative;z-index:5}
+.foot-grid{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:40px;margin-bottom:48px}
+.foot-grid .desc{color:var(--muted);font-size:12.5px;line-height:1.7;margin-top:14px;max-width:260px}
+.foot-col h5{font-size:11px;font-weight:800;letter-spacing:1.8px;text-transform:uppercase;color:var(--muted);margin-bottom:18px}
+.foot-col a{display:block;font-size:13.5px;color:var(--sub);font-weight:550;margin-bottom:12px;transition:color .2s}
+.foot-col a:hover{color:var(--mint)}
+.foot-bottom{border-top:1px solid var(--border);padding-top:26px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
+.foot-bottom .legal{display:flex;gap:20px}
+.foot-bottom .legal a:hover{color:var(--mint)}
+
+@media (max-width:960px){
+  .hero{grid-template-columns:1fr;padding-top:56px;text-align:center}
+  .hero p{margin:0 auto}
+  .hero-ctas{justify-content:center}
+  .hero-stats{justify-content:center}
+  .nav-links{display:none}
+  .steps,.feats{grid-template-columns:1fr}
+  .step-arrow{display:none}
+  .chips{grid-template-columns:repeat(2,1fr)}
+  .prices{grid-template-columns:1fr}
+  .foot-grid{grid-template-columns:1fr 1fr}
+  .fc1{left:0}.fc2{right:0}
+}
+</style>
+</head>
+<body>
+
+<div class="aurora"></div>
+<div class="grid-bg"></div>
+
+<div class="preview-banner">🎨 <span><b>Design preview only</b> — no project code modified</span></div>
+
+<!-- TICKER -->
+<div class="ticker">
+  <div class="ticker-track" id="ticker"></div>
+</div>
+
+<!-- NAV -->
+<nav>
+  <div class="wrap nav-in">
+    <div class="logo">
+      <div class="logo-mark">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M3 17l5-6 4 4 6-8 3 3" stroke="#04130C" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <span>EquityAlerts</span>
+    </div>
+    <div class="nav-links">
+      <a href="#how">How It Works</a>
+      <a href="#features">Features</a>
+      <a href="#monitor">Coverage</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#faq">FAQ</a>
+    </div>
+    <div class="nav-cta">
+      <a class="link-ghost" href="#">Login</a>
+      <button class="btn btn-primary">Start Free →</button>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<header class="wrap hero">
+  <div>
+    <span class="badge"><span class="dot"></span> 893 analysts tracking announcements live</span>
+    <h1>Never miss a <span class="grad-text">company announcement</span> again.</h1>
+    <p>Track NSE &amp; BSE companies and get instant WhatsApp alerts for earnings, dividends, board meetings, acquisitions and regulatory filings — the moment they're published.</p>
+    <div class="hero-ctas">
+      <button class="btn btn-primary btn-lg">Start Tracking Free</button>
+      <a href="#pricing"><button class="btn btn-outline btn-lg">View Plans</button></a>
+    </div>
+    <div class="hero-stats">
+      <div class="stat"><div class="num"><em data-count="200">0</em>+</div><div class="lbl">Companies</div></div>
+      <div class="stat"><div class="num"><em>&lt;1</em>s</div><div class="lbl">Alert Latency</div></div>
+      <div class="stat"><div class="num"><em data-count="24">0</em>/7</div><div class="lbl">Monitoring</div></div>
+      <div class="stat"><div class="num"><em>₹0</em></div><div class="lbl">To Start</div></div>
+    </div>
+  </div>
+
+  <div class="phone-zone">
+    <div class="float-card fc1">
+      <div class="fc-l">NSE Feed</div>
+      <div class="fc-v up">● CONNECTED</div>
+    </div>
+    <div class="float-card fc2">
+      <div class="fc-l">Alerts today</div>
+      <div class="fc-v up">+1,284</div>
+    </div>
+    <div class="phone">
+      <div class="phone-screen">
+        <div class="wa-header">
+          <div class="wa-avatar">EA</div>
+          <div>
+            <div class="wa-name">EquityAlerts</div>
+            <div class="wa-status">● online</div>
+          </div>
+        </div>
+        <div class="wa-body">
+          <div class="wa-msg">
+            <span class="wa-tag t-earnings">Earnings</span>
+            <b>RELIANCE — Q4 Results Out</b>
+            <span>Consolidated net profit ₹18,951 Cr. Full filing PDF attached.</span>
+            <div class="wa-time">09:42 ✓✓</div>
+          </div>
+          <div class="wa-msg">
+            <span class="wa-tag t-div">Dividend</span>
+            <b>TCS — Dividend Declared</b>
+            <span>Interim dividend of ₹10/share. Record date: 16 Jun 2026.</span>
+            <div class="wa-time">10:15 ✓✓</div>
+          </div>
+          <div class="wa-msg">
+            <span class="wa-tag t-board">Board Meeting</span>
+            <b>HDFCBANK — Board Meeting</b>
+            <span>Board meeting scheduled 19 Jun to consider fund raising.</span>
+            <div class="wa-time">11:03 ✓✓</div>
+          </div>
+          <div class="wa-msg">
+            <span class="wa-tag t-acq">Acquisition</span>
+            <b>INFY — Acquisition Update</b>
+            <span>Completes acquisition of EU-based consulting firm.</span>
+            <div class="wa-time">11:40 ✓✓</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- TRUST STRIP -->
+<div class="trust">
+  <div class="wrap trust-in">
+    <div class="trust-item"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>200+ Companies</div>
+    <div class="trust-item"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>WhatsApp Alerts</div>
+    <div class="trust-item"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Free Forever Plan</div>
+    <div class="trust-item"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>NSE &amp; BSE Coverage</div>
+    <div class="trust-item"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Real-Time Monitoring</div>
+  </div>
+</div>
+
+<!-- HOW IT WORKS -->
+<section id="how" class="sec">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="kicker">Process Flow</span>
+      <h2>Three steps. Zero manual checking.</h2>
+      <p>Set up once and let EquityAlerts watch the exchanges for you, around the clock.</p>
+    </div>
+    <div class="steps">
+      <div class="step reveal">
+        <div class="step-num">01</div>
+        <h3>Choose Companies</h3>
+        <p>Search our database of 200+ NSE &amp; BSE listed companies and build your personal watchlist in seconds.</p>
+        <span class="step-arrow">→</span>
+      </div>
+      <div class="step reveal" style="transition-delay:.1s">
+        <div class="step-num">02</div>
+        <h3>We Monitor Filings</h3>
+        <p>Our engine continuously scans corporate disclosures, results, dividends and regulatory filings — 24/7.</p>
+        <span class="step-arrow">→</span>
+      </div>
+      <div class="step reveal" style="transition-delay:.2s">
+        <div class="step-num">03</div>
+        <h3>Get WhatsApp Alerts</h3>
+        <p>The moment something is published, it lands in your WhatsApp with the filing PDF attached. Sub-second latency.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features" class="feat-band">
+  <div class="wrap sec">
+    <div class="sec-head reveal">
+      <span class="kicker">Benefits</span>
+      <h2>Why investors use EquityAlerts</h2>
+      <p>A robust, lightweight alerts terminal built for modern market participants.</p>
+    </div>
+    <div class="feats">
+      <div class="feat reveal">
+        <div class="feat-ic"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v2M12 19v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M3 12h2M19 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4" stroke="#33D097" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="4" stroke="#33D097" stroke-width="1.8"/></svg></div>
+        <h4>Never miss announcements</h4>
+        <p>Continuous feeds covering corporate announcements, quarterly earnings and regulatory changes.</p>
+      </div>
+      <div class="feat reveal" style="transition-delay:.06s">
+        <div class="feat-ic"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#33D097" stroke-width="1.8"/><path d="M12 7v5l3.5 2" stroke="#33D097" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+        <h4>No manual checking</h4>
+        <p>Save hours scrolling BSE and NSE filing logs. The critical content gets pushed to you automatically.</p>
+      </div>
+      <div class="feat reveal" style="transition-delay:.12s">
+        <div class="feat-ic"><svg viewBox="0 0 24 24" fill="none"><path d="M21 11.5a8.4 8.4 0 01-9.3 8.4 8.6 8.6 0 01-3.9-1L3 20l1.2-4.6A8.4 8.4 0 1121 11.5z" stroke="#33D097" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+        <h4>WhatsApp notifications</h4>
+        <p>Alerts arrive directly in your messaging app. Tap to read disclosure PDFs on the go.</p>
+      </div>
+      <div class="feat reveal">
+        <div class="feat-ic"><svg viewBox="0 0 24 24" fill="none"><path d="M13 3L4 14h6l-1 7 9-11h-6l1-7z" stroke="#33D097" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+        <h4>Simple setup</h4>
+        <p>Register with your phone number, authenticate via OTP, and define your watchlist instantly.</p>
+      </div>
+      <div class="feat reveal" style="transition-delay:.06s">
+        <div class="feat-ic"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="14" rx="2.5" stroke="#33D097" stroke-width="1.8"/><path d="M7 9h4M7 13h7" stroke="#33D097" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+        <h4>Track multiple companies</h4>
+        <p>Customise watchlists based on your plan. Monitor up to 25 firms simultaneously.</p>
+      </div>
+      <div class="feat reveal" style="transition-delay:.12s">
+        <div class="feat-ic"><svg viewBox="0 0 24 24" fill="none"><path d="M3 17l5-6 4 4 6-8 3 3" stroke="#33D097" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <h4>Fast and lightweight</h4>
+        <p>Optimised architecture delivering sub-second search, filters and live updates.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- WHAT WE MONITOR -->
+<section id="monitor" class="sec">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="kicker">Coverage</span>
+      <h2>What we monitor</h2>
+      <p>Instant tracking of the key events that move prices, straight from regulatory filing databases.</p>
+    </div>
+    <div class="chips">
+      <div class="chip reveal"><span class="ic">📊</span>Quarterly Results</div>
+      <div class="chip reveal" style="transition-delay:.04s"><span class="ic">💰</span>Dividends</div>
+      <div class="chip reveal" style="transition-delay:.08s"><span class="ic">🗓️</span>Board Meetings</div>
+      <div class="chip reveal" style="transition-delay:.12s"><span class="ic">🤝</span>Acquisitions</div>
+      <div class="chip reveal"><span class="ic">🎁</span>Bonus Issues</div>
+      <div class="chip reveal" style="transition-delay:.04s"><span class="ic">📜</span>Rights Issues</div>
+      <div class="chip reveal" style="transition-delay:.08s"><span class="ic">⚖️</span>Regulatory Filings</div>
+      <div class="chip reveal" style="transition-delay:.12s"><span class="ic">👥</span>Shareholding Updates</div>
+    </div>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section id="pricing" class="feat-band">
+  <div class="wrap sec">
+    <div class="sec-head reveal">
+      <span class="kicker">Pricing</span>
+      <h2>Simple, honest pricing</h2>
+      <p>Start free. Upgrade when your watchlist grows.</p>
+    </div>
+    <div class="prices">
+      <div class="price reveal">
+        <div class="tier">Free</div>
+        <div class="amount">₹0 <small>forever</small></div>
+        <div class="desc">For investors getting started with announcement tracking.</div>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Access all 200+ companies</li>
+          <li><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Track up to <b>&nbsp;5 companies</b></li>
+          <li><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Real-time WhatsApp alerts</li>
+        </ul>
+        <button class="btn btn-outline" style="width:100%">Get Started</button>
+      </div>
+      <div class="price hot reveal" style="transition-delay:.1s">
+        <span class="hot-badge">Most Popular</span>
+        <div class="tier">Premium</div>
+        <div class="amount">₹119 <small>/ month</small></div>
+        <div class="desc">For active investors who track a full portfolio.</div>
+        <ul>
+          <li><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Access all 200+ companies</li>
+          <li><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Track up to <b>&nbsp;25 companies</b></li>
+          <li><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Real-time WhatsApp alerts</li>
+          <li><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#33D097" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="#33D097" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Priority alert delivery</li>
+        </ul>
+        <button class="btn btn-primary" style="width:100%">Go Premium →</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section id="faq" class="sec">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <span class="kicker">FAQ</span>
+      <h2>Frequently asked questions</h2>
+    </div>
+    <div class="faq reveal">
+      <details class="faq-item" open>
+        <summary>How fast do alerts arrive after an announcement?</summary>
+        <div class="ans">Our engine monitors exchange filings continuously and dispatches WhatsApp alerts with sub-second processing latency — typically you'll have the announcement before it trends anywhere else.</div>
+      </details>
+      <details class="faq-item">
+        <summary>Do I need to install an app?</summary>
+        <div class="ans">No. Alerts arrive directly on WhatsApp, and your watchlist is managed from this web portal. Nothing to install, nothing to keep open.</div>
+      </details>
+      <details class="faq-item">
+        <summary>What does the free plan include?</summary>
+        <div class="ans">The free plan is free forever and lets you track up to 5 companies with full real-time WhatsApp alerts. Upgrade to Premium (₹119/month) to track up to 25 companies.</div>
+      </details>
+      <details class="faq-item">
+        <summary>Is this investment advice?</summary>
+        <div class="ans">No. EquityAlerts provides informational alerts only and does not offer investment advice. Always do your own research before making investment decisions.</div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- FINAL CTA -->
+<section class="sec" style="padding-top:20px">
+  <div class="wrap">
+    <div class="cta-card reveal">
+      <h2>Start tracking companies <span class="grad-text">today</span></h2>
+      <p>Create a free account and get your first WhatsApp alert in minutes. No credit card required.</p>
+      <div class="hero-ctas">
+        <button class="btn btn-primary btn-lg">Create Free Account</button>
+        <button class="btn btn-outline btn-lg">Login</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <div class="logo">
+          <div class="logo-mark" style="width:32px;height:32px;border-radius:9px"><svg viewBox="0 0 24 24" fill="none" style="width:16px;height:16px"><path d="M3 17l5-6 4 4 6-8 3 3" stroke="#04130C" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <span style="font-size:16px">EquityAlerts</span>
+        </div>
+        <p class="desc">Company announcement monitoring for NSE &amp; BSE. Informational alerts only — not investment advice.</p>
+      </div>
+      <div class="foot-col">
+        <h5>Product</h5>
+        <a href="#features">Features</a>
+        <a href="#monitor">Coverage</a>
+        <a href="#pricing">Pricing</a>
+      </div>
+      <div class="foot-col">
+        <h5>Account</h5>
+        <a href="#">Login</a>
+        <a href="#">Register</a>
+        <a href="#">Plans</a>
+      </div>
+      <div class="foot-col">
+        <h5>Support</h5>
+        <a href="mailto:support@equityalerts.ai">Contact</a>
+        <a href="#faq">FAQ</a>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <span>© 2026 EquityAlerts. All rights reserved.</span>
+      <div class="legal">
+        <a href="#">Privacy Policy</a>
+        <a href="#">Terms of Service</a>
+        <a href="#">Disclaimer</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+// ticker
+const symbols=[["RELIANCE","+1.24%",1],["TCS","-0.42%",0],["INFY","+0.87%",1],["HDFCBANK","+0.31%",1],["ICICIBANK","-0.18%",0],["BHARTIARTL","+2.05%",1],["SBIN","+0.66%",1],["LICI","-0.74%",0],["ITC","+0.12%",1],["KOTAKBANK","+1.48%",1]];
+const t=document.getElementById("ticker");
+let html="";
+for(let r=0;r<2;r++) for(const [s,c,up] of symbols)
+  html+=`<span class="tick"><b>${s}</b><span class="${up?'up':'down'}">${up?'▲':'▼'} ${c}</span></span>`;
+t.innerHTML=html;
+
+// reveal on scroll
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add("in");io.unobserve(e.target)}}),{threshold:.12});
+document.querySelectorAll(".reveal").forEach(el=>io.observe(el));
+
+// animated counters
+const cio=new IntersectionObserver(es=>es.forEach(e=>{
+  if(!e.isIntersecting)return;
+  const el=e.target,end=+el.dataset.count,t0=performance.now();
+  const step=now=>{const p=Math.min((now-t0)/1200,1);el.textContent=Math.round(end*(1-Math.pow(1-p,3)));if(p<1)requestAnimationFrame(step)};
+  requestAnimationFrame(step);cio.unobserve(el);
+}),{threshold:.5});
+document.querySelectorAll("[data-count]").forEach(el=>cio.observe(el));
+</script>
+</body>
+</html>

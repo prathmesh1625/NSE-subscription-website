@@ -1,0 +1,35 @@
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── Node ─────────────────────────────────────────────────
+node_modules/
+
+# ── Secrets & local env (never commit) ───────────────────
+.env
+*.env
+!*.env.example
+
+# ── Databases, caches & generated artifacts ──────────────
+*.db
+bot_data.db
+generated_cards/
+*.log
+
+# ── Scraper downloaded filings (regenerable, huge) ───────
+storage/
+# Demo/generated Stock Bits card artifacts
+stock_bits_card.pdf
+stock_bits_card.png
+suzlon_card.pdf
+
+# ── Nested subscription-portal (its own git repo) ────────
+nse-website/subscription-portal/
+
+# ── OS / editor cruft ────────────────────────────────────
+.DS_Store
+Thumbs.db
