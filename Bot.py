@@ -442,10 +442,16 @@ PORTAL_DIST = os.path.join(
 @app.route("/portal", defaults={"path": ""})
 @app.route("/portal/<path:path>")
 def serve_portal(path):
-    """Serve the built React subscription portal."""
+    """Serve the built React subscription portal.
+
+    conditional=False disables Flask/Werkzeug Range handling. Otherwise a
+    crawler that sends a `Range: bytes=0-` header (e.g. facebookexternalhit)
+    gets a 206 Partial Content, which makes Meta domain verification fail —
+    it only accepts a 200 on the verified URL (e.g. /portal/disclaimer).
+    """
     if path and os.path.exists(os.path.join(PORTAL_DIST, path)):
-        return send_from_directory(PORTAL_DIST, path)
-    return send_from_directory(PORTAL_DIST, "index.html")
+        return send_from_directory(PORTAL_DIST, path, conditional=False)
+    return send_from_directory(PORTAL_DIST, "index.html", conditional=False)
 
 
 # ── Proxy API calls to website backend (port 3001) ───────────
