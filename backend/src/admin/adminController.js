@@ -79,6 +79,10 @@ async function stats(req, res) {
                     label: "Total amount received",
                     value: Number(row.total_received),
                     format: "currency",
+                    // Lets the dashboard render this card as clickable and,
+                    // on click, fetch GET /stats/payments/detail (below) to
+                    // show exactly which payments make up this total.
+                    detailKey: "payments",
                 },
                 {
                     key: "total_refund_pending",
@@ -115,6 +119,46 @@ async function stats(req, res) {
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, message: "Failed to load stats" });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/v1/stats/:key/detail
+//
+// Drill-down for a stat card that declared a `detailKey` in /stats above.
+// Returns a simple table (columns/rows) the dashboard renders generically —
+// same shape as a "table" detail section, just not tied to one user.
+// ---------------------------------------------------------------------------
+async function statDetail(req, res) {
+    try {
+        const key = req.params.key;
+
+        if (key === "payments") {
+            const payments = await repo.getSuccessfulPayments();
+
+            return res.json({
+                success: true,
+                title: "Payments received",
+                // total_received is SUM(amount) over every payment with
+                // status = 'SUCCESS' (see adminRepository.getStats) — this
+                // is that same set of rows, so the numbers always agree.
+                description:
+                    "Every successful payment (status = SUCCESS) sums to the \u201cTotal amount received\u201d figure.",
+                columns: ["Date", "User", "Phone", "Amount", "Razorpay payment ID"],
+                rows: payments.map((p) => [
+                    p.created_at,
+                    p.name || "(no name on file)",
+                    p.mobile,
+                    Number(p.amount),
+                    p.razorpay_payment_id || "—",
+                ]),
+            });
+        }
+
+        return res.status(400).json({ success: false, message: `Unknown stat detail key: ${key}` });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: "Failed to load stat detail" });
     }
 }
 
@@ -362,6 +406,7 @@ async function getOptions(req, res) {
 module.exports = {
     meta,
     stats,
+    statDetail,
     listUsers,
     getUser,
     runAction,

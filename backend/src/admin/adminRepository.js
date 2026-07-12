@@ -21,6 +21,26 @@ async function getStats() {
     return result.rows[0];
 }
 
+// Every payment that counts toward `total_received` in getStats() above
+// (status = 'SUCCESS'), joined with the paying user's name/mobile so the
+// dashboard's drill-down view can show who each payment came from.
+async function getSuccessfulPayments() {
+    const result = await db.query(`
+        SELECT
+            p.id,
+            p.amount,
+            p.razorpay_payment_id,
+            p.created_at,
+            u.name,
+            u.mobile
+        FROM payments p
+        JOIN users u ON u.id = p.user_id
+        WHERE p.status = 'SUCCESS'
+        ORDER BY p.created_at DESC
+    `);
+    return result.rows;
+}
+
 // ---------------------------------------------------------------------------
 // Users - search / list / detail
 // ---------------------------------------------------------------------------
@@ -294,6 +314,7 @@ async function searchCompanies(search, selectedIds = []) {
 
 module.exports = {
     getStats,
+    getSuccessfulPayments,
     searchUsers,
     getUserProfile,
     getUserSubscriptionHistory,

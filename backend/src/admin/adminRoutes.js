@@ -9,6 +9,7 @@ router.use(adminAuthMiddleware);
 
 router.get("/meta", adminController.meta);
 router.get("/stats", adminController.stats);
+router.get("/stats/:key/detail", adminController.statDetail);
 router.get("/users", adminController.listUsers);
 router.get("/users/:id", adminController.getUser);
 router.post("/users/:id/actions/:actionKey", adminController.runAction);
