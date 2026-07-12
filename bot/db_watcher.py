@@ -758,10 +758,23 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
             # to their own template with one metric per line. Until then they
             # fall through to the Stock Bits template below (current behaviour).
             result_tpl = getattr(config, "TEMPLATE_RESULT_NAME", "") or ""
-            is_result  = "💼" in (caption or "") and "📊" in (caption or "")
+            # Route to nse_result_bits whenever the topic/event line below the
+            # company says "Results Out" — this catches BOTH the structured
+            # Result Bits layout (💼 … | … Results Out / 📊 metrics) AND a flat
+            # Stock Bits summary of a results filing (⚡ … Results Out). Anything
+            # else stays on the earlier Stock Bits template (TEMPLATE_NAME).
+            is_result = (
+                bool(re.search(r"results?\s+out", caption or "", re.IGNORECASE))
+                or ("💼" in (caption or "") and "📊" in (caption or ""))
+            )
             if is_result and result_tpl:
                 slots   = int(getattr(config, "TEMPLATE_RESULT_METRIC_SLOTS", 3))
                 metrics = _compact_metric_lines(caption, slots)
+                # Flat results (no 📊 Key Metrics table) come back as empty "—"
+                # slots. Rather than ship a blank table, carry the 🤖 summary
+                # body in the first slot so the numbers still reach the user.
+                if body and all(m == "—" for m in metrics):
+                    metrics = [body] + ["—"] * (slots - 1)
                 params  = [
                     title or "📢 *PureFrame Result Bits!!*",
                     f"💼 {company} | {event}" if event else f"💼 {company}",
