@@ -93,7 +93,7 @@ export default function Pricing() {
                             </span>
 
                             <h2 className="text-6xl font-bold mt-5">
-                                ₹149
+                                ₹299
                             </h2>
 
                             <p className="text-[#98A0AE] mb-8">

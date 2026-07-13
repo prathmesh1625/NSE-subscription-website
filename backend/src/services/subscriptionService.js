@@ -11,6 +11,28 @@ const subscriptionRepository =
 const FREE_PLAN_ID = 1;
 const PREMIUM_PLAN_ID = 2;
 
+/**
+ * Compute the end date for a premium subscription that starts at `startDate`.
+ *
+ * Premium is a one-month plan, billed as a whole calendar month: a plan
+ * started on the 14th ends on the 14th of the next month (14 Jul → 14 Aug),
+ * not 30 days later.
+ */
+function premiumEndDate(
+    startDate
+) {
+
+    const endDate =
+        new Date(startDate);
+
+    endDate.setMonth(
+        endDate.getMonth() + 1
+    );
+
+    return endDate;
+
+}
+
 async function createFreeSubscription(
     userId
 ) {
@@ -65,13 +87,6 @@ async function createPremiumSubscription(
     userId
 ) {
 
-    const plan =
-
-        await planRepository
-            .findById(
-                PREMIUM_PLAN_ID
-            );
-
     await subscriptionRepository
         .deactivateActiveSubscription(
             userId
@@ -81,17 +96,9 @@ async function createPremiumSubscription(
         new Date();
 
     const endDate =
-        new Date();
-
-    endDate.setDate(
-
-        endDate.getDate() +
-
-        Number(
-            (plan && plan.duration_days) || 30
-        )
-
-    );
+        premiumEndDate(
+            startDate
+        );
 
     return subscriptionRepository.create(
 
@@ -113,6 +120,8 @@ module.exports = {
 
     createFreeSubscription,
 
-    createPremiumSubscription
+    createPremiumSubscription,
+
+    premiumEndDate
 
 };

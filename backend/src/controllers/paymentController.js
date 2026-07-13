@@ -23,6 +23,17 @@ const planRepository =
         "../repositories/planRepository"
     );
 
+const subscriptionService =
+    require(
+        "../services/subscriptionService"
+    );
+
+const {
+    getCouponDiscount
+} = require(
+    "../config/coupons"
+);
+
 const PREMIUM_PLAN_ID = 2;
 
 async function createOrder(
@@ -56,11 +67,55 @@ async function createOrder(
 
         }
 
+        // Resolve any coupon to a discount percentage.
+        const coupon =
+            String(req.body.coupon || "")
+                .trim()
+                .toUpperCase();
+
+        const discountPercent =
+            getCouponDiscount(coupon);
+
+        if (discountPercent === null) {
+
+            return res
+                .status(400)
+                .json({
+
+                    success: false,
+
+                    message:
+                        "Invalid coupon code"
+
+                });
+
+        }
+
+        // 100%-off is a no-payment activation — tell the client to redeem it
+        // via the /subscriptions/premium route instead of opening checkout.
+        if (discountPercent === 100) {
+
+            return res.json({
+
+                success: true,
+
+                fullDiscount: true
+
+            });
+
+        }
+
+        const amount =
+            Math.round(
+                Number(plan.price) *
+                (100 - discountPercent)
+            ) / 100;
+
         const order =
 
             await paymentService
                 .createOrder(
-                    Number(plan.price)
+                    amount
                 );
 
         await paymentRepository
@@ -68,7 +123,7 @@ async function createOrder(
 
                 req.user.id,
 
-                Number(plan.price),
+                amount,
 
                 order.id
 
@@ -78,7 +133,9 @@ async function createOrder(
 
             success: true,
 
-            order
+            order,
+
+            discountPercent
 
         });
 
@@ -264,28 +321,13 @@ async function verifyPayment(
 
             );
 
-        const plan =
-
-            await planRepository
-                .findById(
-                    PREMIUM_PLAN_ID
-                );
-
         const startDate =
             new Date();
 
         const endDate =
-            new Date();
-
-        endDate.setDate(
-
-            endDate.getDate() +
-
-            Number(
-                (plan && plan.duration_days) || 30
-            )
-
-        );
+            subscriptionService.premiumEndDate(
+                startDate
+            );
 
         await subscriptionRepository
             .create(

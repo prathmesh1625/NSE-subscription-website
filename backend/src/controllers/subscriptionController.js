@@ -8,6 +8,12 @@ const subscriptionRepository =
         "../repositories/subscriptionRepository"
     );
 
+const {
+    getCouponDiscount
+} = require(
+    "../config/coupons"
+);
+
 async function activateFreePlan(
     req,
     res
@@ -112,16 +118,12 @@ async function activatePremiumPlan(
     try {
 
         // Premium without a Razorpay payment is allowed ONLY with a valid
-        // 100%-off coupon. (Paid purchases go through paymentController.)
+        // 100%-off coupon. Percentage coupons still require payment and go
+        // through paymentController.createOrder instead.
         const coupon =
             String(req.body.coupon || "").trim().toUpperCase();
 
-        const validCoupon =
-            String(process.env.PREMIUM_COUPON_100 || "PUREFRAME100")
-                .trim()
-                .toUpperCase();
-
-        if (!coupon || coupon !== validCoupon) {
+        if (getCouponDiscount(coupon) !== 100) {
 
             return res
                 .status(400)

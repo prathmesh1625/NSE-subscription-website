@@ -28,7 +28,7 @@ export function PlanSelection() {
     // Fallback plans
     const activePlans = plans.length > 0 ? plans : [
         { id: 1, name: "FREE", price: 0, company_limit: 5, duration_days: 3650 },
-        { id: 2, name: "PREMIUM", price: 119, company_limit: 150, duration_days: 30 }
+        { id: 2, name: "PREMIUM", price: 299, company_limit: 150, duration_days: 30 }
     ];
 
     /**
@@ -58,9 +58,16 @@ export function PlanSelection() {
         setTimeout(() => navigate("/companies"), 1200);
     };
 
-    /** Pay for premium via Razorpay checkout. */
+    /** Pay for premium via Razorpay checkout (coupon applies a discount). */
     const payWithRazorpay = async (plan) => {
-        const orderData = await createOrder();
+        const orderData = await createOrder(coupon.trim());
+
+        // A 100%-off coupon needs no payment — activate premium directly.
+        if (orderData.fullDiscount) {
+            await redeemCoupon();
+            return;
+        }
+
         const order = orderData.order;
 
         if (!window.Razorpay) {
@@ -104,18 +111,16 @@ export function PlanSelection() {
     };
 
     /**
-     * Premium: use the coupon if one is entered, otherwise pay via Razorpay.
+     * Premium: create an order (a coupon, if entered, is validated and applied
+     * server-side). A 100%-off coupon activates without payment; a percentage
+     * coupon discounts the Razorpay amount.
      */
     const handleSelectPremium = async (plan) => {
         setActionLoading("PREMIUM");
         setErrorMessage("");
         setSuccessMessage("");
         try {
-            if (coupon.trim()) {
-                await redeemCoupon();
-            } else {
-                await payWithRazorpay(plan);
-            }
+            await payWithRazorpay(plan);
         } catch (err) {
             setErrorMessage(
                 err?.response?.data?.message || err.message || "Could not activate Premium."
@@ -279,7 +284,7 @@ export function PlanSelection() {
                                         >
                                             {isPremiumPlan
                                                 ? (coupon.trim()
-                                                    ? "Apply coupon & activate"
+                                                    ? "Apply coupon & continue"
                                                     : `Pay ₹${parseFloat(plan.price).toFixed(0)} & activate`)
                                                 : "Select Starter Plan"}
                                         </Button>

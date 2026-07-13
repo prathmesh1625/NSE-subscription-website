@@ -1,14 +1,17 @@
 import API from "./axios";
 
 /**
- * Create Razorpay Order
+ * Create Razorpay Order.
+ * An optional coupon code applies a percentage discount to the order amount.
+ * @param {string} [coupon]
  */
-export async function createOrder() {
+export async function createOrder(coupon) {
 
     const response =
 
         await API.post(
-            "/payments/create-order"
+            "/payments/create-order",
+            { coupon }
         );
 
     return response.data;
