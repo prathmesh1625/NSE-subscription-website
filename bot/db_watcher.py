@@ -346,12 +346,51 @@ def _format_exchange_time(raw) -> str:
 SUMMARY_FORMAT_VERSION = 2
 
 
+def _split_inline_metrics(caption: str) -> list:
+    """
+    Newer summaries put the whole metrics table INLINE on the 🤖 line (one run of
+    text) rather than as a "📊 Key Metrics" block. Split that run back into one
+    compact line per metric so each fills its own results-template slot:
+
+        "Revenue from operations (REV): ₹34,579 Cr · 🟢 +1.75% QoQ, 🟢 +13.36% YoY"
+
+    Returns [] when the body has no "<name> (ABBR): … YoY" metric blocks.
+    """
+    bm = re.search(r"🤖\s*(.+?)(?:\n\s*🔗|\n\s*📎|\n\s*You are receiving|$)",
+                   caption or "", re.DOTALL)
+    body = re.sub(r"\s+", " ", (bm.group(1) if bm else (caption or ""))).strip()
+
+    lines = []
+    for b in re.findall(r"[A-Za-z][A-Za-z0-9 ./&()'-]*?\([A-Z]{2,}\):.*?YoY", body):
+        segs   = b.split("\U0001F5D3")               # split on the 🗓 calendar emoji
+        name   = segs[0].rstrip(" :").strip()
+        latest = ""
+        if len(segs) > 1:
+            first  = segs[1]
+            latest = (first.split(":", 1)[1] if ":" in first else first).strip()
+            latest = latest.lstrip("️").strip()  # drop a leading variation selector
+        tm = re.search(
+            r"([\U0001F7E2\U0001F534\U0001F680\U0001F53B➡]?\s*"
+            r"[+\-]?\d[\d.]*\s*%\s*QoQ,.*?YoY)",
+            segs[-1],
+        )
+        trend = tm.group(1).strip() if tm else ""
+        seg = name
+        if latest:
+            seg += f": {latest}"
+        if trend:
+            seg += f" · {trend}"
+        lines.append(seg)
+    return lines
+
+
 def _compact_metric_lines(caption: str, slots: int = 3) -> list:
     """
-    Turn the Result Bits metrics table into ONE COMPACT LINE PER METRIC, for the
+    Turn the Result Bits metrics into ONE COMPACT LINE PER METRIC, for the
     dedicated results template (each template variable must be a single line, so
     the 3-period breakdown can't survive there — the free-form text alert keeps
-    the full table).
+    the full table). Handles BOTH the "📊 Key Metrics" table layout and the newer
+    inline 🤖 layout.
 
         "Revenue from operations (REV): ₹72,275 Cr · 🟢 +2.03% QoQ, 🟢 +13.00% YoY"
 
@@ -379,6 +418,10 @@ def _compact_metric_lines(caption: str, slots: int = 3) -> list:
             if trend:
                 seg += f" · {trend}"
             lines.append(seg)
+
+    # No structured table — fall back to splitting the inline 🤖 metrics run.
+    if not lines:
+        lines = _split_inline_metrics(caption)
 
     if not lines:
         return ["—"] * slots
@@ -639,7 +682,10 @@ def _parse_stock_bits_parts(caption: str):
     if m:
         body = re.sub(r"\s+", " ", m.group(1)).strip()
         body = re.sub(r"\s*#\w*Impact\s*$", "", body).strip()   # drop trailing #HighImpact
-    um  = re.search(r"📎[^\n]*?(https?://\S+)", text)
+    # The download link may sit under 📎 OR 🔗, on the same line or the next one.
+    um = (re.search(r"Download filing:\s*(?:\n\s*)?(https?://\S+)", text)
+          or re.search(r"(?:📎|🔗)[^\n]*?(https?://\S+)", text)
+          or re.search(r"(https?://equityalerts\.in/t/\S+)", text))
     url = um.group(1) if um else ""
     return title, company, event, body, url, filed
 
@@ -763,8 +809,15 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
             # Result Bits layout (💼 … | … Results Out / 📊 metrics) AND a flat
             # Stock Bits summary of a results filing (⚡ … Results Out). Anything
             # else stays on the earlier Stock Bits template (TEMPLATE_NAME).
+            # The generator brands a message "… Result Bits!!" ONLY when it
+            # actually detected a financial-results filing (everything else is
+            # "… Stock Bits!!"), so the title is the reliable signal. The
+            # "<period> Results Out" event line is not — it varies ("Jun 2026
+            # Results Out", "Results Out", or a heading with no "Out" at all).
+            title_line = re.search(r"📢[^\n]*", caption or "")
             is_result = (
-                bool(re.search(r"results?\s+out", caption or "", re.IGNORECASE))
+                (bool(title_line) and "result bits" in title_line.group(0).lower())
+                or bool(re.search(r"results?\s+out", caption or "", re.IGNORECASE))
                 or ("💼" in (caption or "") and "📊" in (caption or ""))
             )
             if is_result and result_tpl:
