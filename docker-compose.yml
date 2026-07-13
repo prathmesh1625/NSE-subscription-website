@@ -70,6 +70,12 @@ services:
       - BOT_DB_PATH=/app/bot_sqlite/bot_data.db
       - PORTAL_URL=${PORTAL_URL:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # AI summaries run on Google Gemini 2.5 Flash by default (much cheaper than
+      # OpenAI). Set GEMINI_API_KEY in the environment. To fall back to OpenAI,
+      # set SUMMARY_PROVIDER=openai and SUMMARY_MODEL=gpt-4o-mini.
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - SUMMARY_PROVIDER=${SUMMARY_PROVIDER:-google}
+      - SUMMARY_MODEL=${SUMMARY_MODEL:-gemini-2.5-flash}
       # Branded short download links (equityalerts.in/t/<code>). Must be the public
       # origin that reaches this bot; set "" to fall back to raw NSE URLs.
       - SHORTLINK_BASE=${SHORTLINK_BASE:-https://equityalerts.in}

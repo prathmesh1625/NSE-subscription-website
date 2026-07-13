@@ -57,8 +57,12 @@ SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 35))
 SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 6))
 
 # LLM used for the AI summary (in-process via output.py / LangChain).
-SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
-SUMMARY_MODEL    = os.environ.get("SUMMARY_MODEL", "gpt-4o-mini")
+# Default to Google Gemini 2.5 Flash — dramatically cheaper than OpenAI for this
+# workload (and it has a free tier). Needs GEMINI_API_KEY (or GOOGLE_API_KEY) in
+# the environment. Set SUMMARY_PROVIDER=openai + SUMMARY_MODEL=gpt-4o-mini to
+# switch back.
+SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "google")
+SUMMARY_MODEL    = os.environ.get("SUMMARY_MODEL", "gemini-2.5-flash")
 
 # ── Step 5: WhatsApp Message Template (delivery OUTSIDE the 24h window) ──
 # Meta only allows pushing a PDF to a user who has NOT messaged you in the last
