@@ -183,7 +183,7 @@ EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
 # ── Provider → default model mapping ─────────────────────────────────────────
 PROVIDER_DEFAULTS = {
     "anthropic": "claude-opus-4-6",
-    "openai":    "gpt-4o-mini",
+    "openai":    "gpt-4o",
     "google":    "gemini-2.5-flash",
     "gemini":    "gemini-2.5-flash",   # alias for google
     "groq":      "llama-3.3-70b-versatile",
