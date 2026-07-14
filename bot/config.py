@@ -32,6 +32,12 @@ COL_IS_SENT          = "is_notified"      # bot sets TRUE after sending
 # Absolute path to the Node.js scraper root so relative local_path can be resolved
 SCRAPER_BASE_PATH    = os.environ.get("SCRAPER_BASE_PATH", r"d:\prathmesh\shares\nse-announcement-downloader v2")
 
+# ── Admin API (Central Dashboard delivery-status endpoint) ───
+# Shared secret the NSE backend presents on GET /admin/delivery-status
+# (header: x-bot-admin-key). Must match BOT_ADMIN_KEY on the backend service.
+# Generate with `openssl rand -hex 32`.
+BOT_ADMIN_KEY = os.environ.get("BOT_ADMIN_KEY", "")
+
 # ── Step 4: Bot settings ─────────────────────────────────────
 FLASK_PORT        = int(os.environ.get("FLASK_PORT", 5000))
 FLASK_DEBUG       = os.environ.get("FLASK_DEBUG", "False").lower() in ("true", "1", "yes")

@@ -9,6 +9,7 @@
 # ============================================================
 
 from flask import Flask, request, jsonify, send_from_directory, redirect
+import hmac
 import sys
 import os
 import config
@@ -449,6 +450,44 @@ def short_link_redirect(code):
     except Exception as e:
         print(f"⚠️  Could not record click for {code}: {e}")
     return redirect(url, code=302)
+
+
+# ── Admin API (Central Dashboard delivery-status endpoint) ───
+
+@app.route("/admin/delivery-status", methods=["GET"])
+def admin_delivery_status():
+    """
+    Read-only snapshot of per-user WhatsApp delivery state, for the NSE
+    backend's Admin API to merge into the Central Dashboard. Guarded by a
+    shared secret (mirrors adminAuthMiddleware.js on the backend) — never
+    exposed to regular WhatsApp users or the public portal.
+    """
+    provided = request.headers.get("x-bot-admin-key", "")
+    expected = config.BOT_ADMIN_KEY
+
+    if not expected:
+        return jsonify({"success": False, "message": "Admin API is not configured on this server"}), 500
+
+    if not hmac.compare_digest(provided, expected):
+        return jsonify({"success": False, "message": "Invalid or missing x-bot-admin-key header"}), 401
+
+    try:
+        summary = db.get_delivery_status_summary()
+        users = [
+            {
+                "phone": phone,
+                "pendingCount": s["pending_count"],
+                "lastError": s["last_error"],
+                "lastQueuedAt": s["last_queued_at"],
+                "lastDeliveredAt": s["last_delivered_at"],
+                "windowOpen": s["window_open"],
+            }
+            for phone, s in summary.items()
+        ]
+        return jsonify({"success": True, "users": users})
+    except Exception as e:
+        print(f"❌ /admin/delivery-status error: {e}")
+        return jsonify({"success": False, "message": "Failed to load delivery status"}), 500
 
 
 # ── Serve React portal (static files) ────────────────────────

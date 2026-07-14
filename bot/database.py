@@ -587,3 +587,98 @@ def get_filing_summary(file_key: str, fmt: int = None):
             ).fetchone()
         conn.close()
         return row["summary"] if row else None
+
+
+# ── Delivery status summary (for the Central Dashboard admin API) ────
+
+def get_delivery_status_summary() -> dict:
+    """
+    Per-phone delivery snapshot, built entirely from existing tables (no new
+    schema). Keyed by phone (WhatsApp format, e.g. "919876543210"):
+
+        {
+            "<phone>": {
+                "pending_count":    2,
+                "last_error":       "template send failed (131047)",
+                "last_queued_at":   "2026-07-13 10:02:00",
+                "last_delivered_at": "2026-07-10 09:15:00",
+                "window_open":      False,
+            }
+        }
+
+    A phone with no pending_filings rows gets pending_count=0 / last_error=None.
+    A phone that has never appeared in sent_filings gets last_delivered_at=None.
+    """
+    with _lock:
+        conn = get_conn()
+
+        pending_rows = conn.execute("""
+            SELECT phone,
+                   COUNT(*)      AS pending_count,
+                   MAX(queued_at) AS last_queued_at
+            FROM pending_filings
+            GROUP BY phone
+        """).fetchall()
+
+        # last_error should come from the MOST RECENTLY queued row per phone,
+        # not an arbitrary one — fetch separately since SQLite has no simple
+        # "value associated with the max of another column" aggregate.
+        last_error_rows = conn.execute("""
+            SELECT pf.phone, pf.last_error
+            FROM pending_filings pf
+            INNER JOIN (
+                SELECT phone, MAX(queued_at) AS max_queued_at
+                FROM pending_filings
+                GROUP BY phone
+            ) latest ON latest.phone = pf.phone AND latest.max_queued_at = pf.queued_at
+        """).fetchall()
+
+        sent_rows = conn.execute("""
+            SELECT phone, MAX(sent_at) AS last_delivered_at
+            FROM sent_filings
+            GROUP BY phone
+        """).fetchall()
+
+        window_rows = conn.execute("""
+            SELECT phone, last_inbound_at
+            FROM users
+            WHERE last_inbound_at IS NOT NULL
+        """).fetchall()
+
+        conn.close()
+
+    summary = {}
+
+    def _entry(phone):
+        return summary.setdefault(phone, {
+            "pending_count": 0,
+            "last_error": None,
+            "last_queued_at": None,
+            "last_delivered_at": None,
+            "window_open": False,
+        })
+
+    for row in pending_rows:
+        e = _entry(row["phone"])
+        e["pending_count"] = row["pending_count"]
+        e["last_queued_at"] = row["last_queued_at"]
+
+    for row in last_error_rows:
+        _entry(row["phone"])["last_error"] = row["last_error"]
+
+    for row in sent_rows:
+        _entry(row["phone"])["last_delivered_at"] = row["last_delivered_at"]
+
+    for row in window_rows:
+        # Same 24h rule as window_open() above, evaluated in Python since we
+        # already have every row in hand (avoids one query per phone).
+        e = _entry(row["phone"])
+        if row["last_inbound_at"]:
+            from datetime import datetime, timedelta, timezone
+            try:
+                last = datetime.strptime(row["last_inbound_at"], "%Y-%m-%d %H:%M:%S")
+                e["window_open"] = last > (datetime.utcnow() - timedelta(hours=24))
+            except ValueError:
+                pass
+
+    return summary

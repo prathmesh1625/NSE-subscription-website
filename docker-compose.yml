@@ -40,6 +40,12 @@ services:
       # than their plan allows. Comma-separated, no country code needed.
       - COMPANY_LIMIT_OVERRIDE_MOBILES=${COMPANY_LIMIT_OVERRIDE_MOBILES:-}
       - COMPANY_LIMIT_OVERRIDE=${COMPANY_LIMIT_OVERRIDE:-150}
+      # Lets this backend read WhatsApp PDF-delivery status from the bot
+      # service's own admin API (GET /admin/delivery-status), for the
+      # Central Dashboard's "who is/isn't receiving PDFs" view. Optional —
+      # if unset, that feature just reports no data instead of failing.
+      - BOT_ADMIN_URL=${BOT_ADMIN_URL:-http://bot:5000}
+      - BOT_ADMIN_KEY=${BOT_ADMIN_KEY:-}
     ports:
       - "3001:3001"
     depends_on:
@@ -76,6 +82,10 @@ services:
       # Dedicated metrics-table template for RESULTS filings (APPROVED in Meta).
       # Empty = results fall back to TEMPLATE_NAME.
       - TEMPLATE_RESULT_NAME=${TEMPLATE_RESULT_NAME:-nse_result_bits}
+      # Shared secret the backend presents on GET /admin/delivery-status
+      # (header x-bot-admin-key). Must match BOT_ADMIN_KEY on the backend
+      # service above. Generate with `openssl rand -hex 32`.
+      - BOT_ADMIN_KEY=${BOT_ADMIN_KEY:-}
     ports:
       - "5000:5000"
     volumes:

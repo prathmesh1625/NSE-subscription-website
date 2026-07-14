@@ -70,6 +70,7 @@ function meta(req, res) {
 async function stats(req, res) {
     try {
         const row = await repo.getStats();
+        const { receiving, notReceiving } = await getPdfDeliveryCounts();
 
         res.json({
             success: true,
@@ -114,12 +115,53 @@ async function stats(req, res) {
                     value: Number(row.total_users),
                     format: "number",
                 },
+                {
+                    key: "users_receiving_pdfs",
+                    label: "Users receiving PDFs",
+                    value: receiving,
+                    format: "number",
+                },
+                {
+                    key: "users_not_receiving_pdfs",
+                    label: "Users not receiving PDFs",
+                    value: notReceiving,
+                    format: "number",
+                    // Drill-down into exactly who, via GET /stats/pdf-issues/detail below.
+                    detailKey: "pdf-issues",
+                },
             ],
         });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, message: "Failed to load stats" });
     }
+}
+
+// ---------------------------------------------------------------------------
+// PDF delivery status helpers
+//
+// A user with an ACTIVE subscription is "not receiving" if they currently
+// have one or more filings stuck in the bot's own pending_filings retry
+// queue — that's the delivery pipeline's own ground-truth signal for a
+// failed/blocked send, reused as-is rather than inventing a new heuristic.
+// ---------------------------------------------------------------------------
+
+async function getPdfDeliveryStatusForActiveSubscribers() {
+    const activeSubscribers = await repo.getActiveSubscribers();
+    const deliveryMap = await repo.fetchDeliveryStatusMap();
+
+    return activeSubscribers.map((u) => ({
+        user: u,
+        status: deliveryMap.get(repo.normalizePhoneForBot(u.mobile)) || null,
+    }));
+}
+
+async function getPdfDeliveryCounts() {
+    const entries = await getPdfDeliveryStatusForActiveSubscribers();
+    const notReceiving = entries.filter(
+        ({ status }) => status && status.pendingCount > 0
+    ).length;
+    return { receiving: entries.length - notReceiving, notReceiving };
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +197,28 @@ async function statDetail(req, res) {
             });
         }
 
+        if (key === "pdf-issues") {
+            const entries = await getPdfDeliveryStatusForActiveSubscribers();
+            const affected = entries.filter(
+                ({ status }) => status && status.pendingCount > 0
+            );
+
+            return res.json({
+                success: true,
+                title: "Users not receiving PDFs",
+                description:
+                    "Active subscribers with one or more filings currently stuck in the WhatsApp delivery retry queue.",
+                columns: ["Phone", "Name", "Pending filings", "Last error", "Last delivered"],
+                rows: affected.map(({ user, status }) => [
+                    user.mobile,
+                    user.name || "(no name on file)",
+                    status.pendingCount,
+                    status.lastError || "—",
+                    status.lastDeliveredAt || "Never",
+                ]),
+            });
+        }
+
         return res.status(400).json({ success: false, message: `Unknown stat detail key: ${key}` });
     } catch (err) {
         console.error(err);
@@ -172,18 +236,28 @@ async function listUsers(req, res) {
         const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
 
         const { rows, total } = await repo.searchUsers(search, page, pageSize);
+        // Only active subscribers can meaningfully be "not receiving" PDFs, so
+        // the delivery map only needs to be checked for those rows below.
+        const deliveryMap = await repo.fetchDeliveryStatusMap();
 
         res.json({
             success: true,
             total,
             page,
             pageSize,
-            users: rows.map((u) => ({
-                id: String(u.id),
-                primary: u.mobile,
-                secondary: u.name || "(no name on file)",
-                tags: [u.plan_name, u.sub_status].filter(Boolean),
-            })),
+            users: rows.map((u) => {
+                const tags = [u.plan_name, u.sub_status].filter(Boolean);
+                if (u.sub_status === "ACTIVE") {
+                    const status = deliveryMap.get(repo.normalizePhoneForBot(u.mobile));
+                    if (status && status.pendingCount > 0) tags.push("PDF ISSUE");
+                }
+                return {
+                    id: String(u.id),
+                    primary: u.mobile,
+                    secondary: u.name || "(no name on file)",
+                    tags,
+                };
+            }),
         });
     } catch (err) {
         console.error(err);
@@ -209,77 +283,101 @@ async function getUser(req, res) {
 
         const activeSub = subs.find((s) => s.status === "ACTIVE");
 
+        const sections = [
+            {
+                key: "profile",
+                title: "Profile",
+                type: "keyvalue",
+                data: {
+                    Name: profile.name || "—",
+                    Mobile: profile.mobile,
+                    "Joined on": profile.created_at,
+                },
+            },
+            {
+                key: "subscription",
+                title: "Current subscription",
+                type: "keyvalue",
+                editable: true,
+                actionKey: "update-subscription",
+                actionParams: {
+                    currentPlanId: activeSub ? activeSub.plan_id : null,
+                },
+                data: activeSub
+                    ? {
+                          Plan: activeSub.plan_name,
+                          Status: activeSub.status,
+                          "Start date": activeSub.start_date,
+                          "End date": activeSub.end_date,
+                          "Share limit": activeSub.company_limit,
+                      }
+                    : { Status: "No subscription yet" },
+            },
+            {
+                key: "companies",
+                title: "Subscribed shares",
+                type: "editable-list",
+                actionKey: "update-companies",
+                data: {
+                    items: companies.map((c) => ({
+                        id: c.id,
+                        label: `${c.company_name} (${c.symbol})`,
+                    })),
+                    limit: activeSub ? activeSub.company_limit : null,
+                },
+            },
+            {
+                key: "payments",
+                title: "Payment history",
+                type: "table",
+                data: {
+                    columns: ["Date", "Amount", "Status", "Refund status", "Refund amount", "Notes"],
+                    rows: payments.map((p) => [
+                        p.created_at,
+                        Number(p.amount),
+                        p.status,
+                        p.refund_status,
+                        p.refund_amount !== null ? Number(p.refund_amount) : null,
+                        p.refund_notes || "",
+                    ]),
+                    rowActions: payments.map((p, idx) => ({
+                        rowIndex: idx,
+                        actionKey: "mark-refund",
+                        actionParams: { paymentId: p.id },
+                        enabled: p.status === "SUCCESS",
+                    })),
+                },
+            },
+        ];
+
+        // Only meaningful for someone who has (or had) a subscription — a
+        // brand-new user with no subscription history was never eligible to
+        // receive anything, so skip the section entirely for them.
+        if (subs.length > 0) {
+            const deliveryMap = await repo.fetchDeliveryStatusMap();
+            const status = deliveryMap.get(repo.normalizePhoneForBot(profile.mobile)) || null;
+            const pendingCount = status ? status.pendingCount : 0;
+
+            sections.push({
+                key: "pdf_delivery",
+                title: "PDF delivery",
+                type: "keyvalue",
+                data: {
+                    Status: pendingCount > 0 ? "Not receiving" : "Receiving",
+                    "Pending filings": pendingCount,
+                    "Last error": (status && status.lastError) || "—",
+                    "Last delivered": (status && status.lastDeliveredAt) || "Never",
+                    "WhatsApp window": status && status.windowOpen ? "Open" : "Closed",
+                },
+            });
+        }
+
         res.json({
             success: true,
             id: String(profile.id),
             primary: profile.mobile,
             secondary: profile.name || "(no name on file)",
-            sections: [
-                {
-                    key: "profile",
-                    title: "Profile",
-                    type: "keyvalue",
-                    data: {
-                        Name: profile.name || "—",
-                        Mobile: profile.mobile,
-                        "Joined on": profile.created_at,
-                    },
-                },
-                {
-                    key: "subscription",
-                    title: "Current subscription",
-                    type: "keyvalue",
-                    editable: true,
-                    actionKey: "update-subscription",
-                    actionParams: {
-                        currentPlanId: activeSub ? activeSub.plan_id : null,
-                    },
-                    data: activeSub
-                        ? {
-                              Plan: activeSub.plan_name,
-                              Status: activeSub.status,
-                              "Start date": activeSub.start_date,
-                              "End date": activeSub.end_date,
-                              "Share limit": activeSub.company_limit,
-                          }
-                        : { Status: "No subscription yet" },
-                },
-                {
-                    key: "companies",
-                    title: "Subscribed shares",
-                    type: "editable-list",
-                    actionKey: "update-companies",
-                    data: {
-                        items: companies.map((c) => ({
-                            id: c.id,
-                            label: `${c.company_name} (${c.symbol})`,
-                        })),
-                        limit: activeSub ? activeSub.company_limit : null,
-                    },
-                },
-                {
-                    key: "payments",
-                    title: "Payment history",
-                    type: "table",
-                    data: {
-                        columns: ["Date", "Amount", "Status", "Refund status", "Refund amount", "Notes"],
-                        rows: payments.map((p) => [
-                            p.created_at,
-                            Number(p.amount),
-                            p.status,
-                            p.refund_status,
-                            p.refund_amount !== null ? Number(p.refund_amount) : null,
-                            p.refund_notes || "",
-                        ]),
-                        rowActions: payments.map((p, idx) => ({
-                            rowIndex: idx,
-                            actionKey: "mark-refund",
-                            actionParams: { paymentId: p.id },
-                            enabled: p.status === "SUCCESS",
-                        })),
-                    },
-                },
-            ],
+            sections,
         });
     } catch (err) {
         console.error(err);

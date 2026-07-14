@@ -1,3 +1,4 @@
+const axios = require("axios");
 const db = require("../config/database");
 
 // ---------------------------------------------------------------------------
@@ -263,6 +264,71 @@ async function setPaymentRefundStatus(paymentId, { refundStatus, refundAmount, n
 }
 
 // ---------------------------------------------------------------------------
+// PDF delivery status (via the bot's own admin API — see the "bot" service
+// in docker-compose.yml). The bot tracks WhatsApp delivery ground-truth in
+// its own SQLite DB; this backend has no direct access to it, so it's read
+// over HTTP with a shared secret, the same pattern the dashboard uses to
+// call THIS backend (see adminAuthMiddleware.js).
+// ---------------------------------------------------------------------------
+
+/** Every user with an ACTIVE subscription — the population "PDF delivery" is evaluated over. */
+async function getActiveSubscribers() {
+    const result = await db.query(`
+        SELECT DISTINCT u.id, u.name, u.mobile
+        FROM users u
+        JOIN subscriptions s ON s.user_id = u.id
+        WHERE s.status = 'ACTIVE'
+        ORDER BY u.mobile
+    `);
+    return result.rows;
+}
+
+/**
+ * Converts a user's stored mobile number (10-digit, no country code) into
+ * the format the bot keys its delivery-status data by (91-prefixed, the
+ * WhatsApp "from" field) — mirrors the exact normalization already done in
+ * bot/db_watcher.py::get_subscribers_for_symbol_pg.
+ */
+function normalizePhoneForBot(mobile) {
+    const digits = String(mobile || "").replace(/\D/g, "");
+    return digits.length === 10 ? `91${digits}` : digits;
+}
+
+/**
+ * Fetches the bot's per-phone delivery snapshot and returns it as a Map
+ * keyed by the bot's phone format (see normalizePhoneForBot). Fails soft —
+ * if the bot is unreachable or unconfigured, callers get an empty Map so
+ * the rest of the admin API (stats/users/actions) keeps working.
+ */
+async function fetchDeliveryStatusMap() {
+    const baseUrl = process.env.BOT_ADMIN_URL;
+    const apiKey = process.env.BOT_ADMIN_KEY;
+
+    if (!baseUrl || !apiKey) {
+        console.warn(
+            "BOT_ADMIN_URL/BOT_ADMIN_KEY not configured — PDF delivery status will be unavailable."
+        );
+        return new Map();
+    }
+
+    try {
+        const response = await axios.get(`${baseUrl}/admin/delivery-status`, {
+            headers: { "x-bot-admin-key": apiKey },
+            timeout: 5000,
+        });
+
+        const map = new Map();
+        for (const u of response.data.users || []) {
+            map.set(u.phone, u);
+        }
+        return map;
+    } catch (err) {
+        console.error("Failed to fetch delivery status from bot:", err.message);
+        return new Map();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Option lists (for building forms in the dashboard)
 // ---------------------------------------------------------------------------
 
@@ -325,4 +391,7 @@ module.exports = {
     setPaymentRefundStatus,
     listPlans,
     searchCompanies,
+    getActiveSubscribers,
+    normalizePhoneForBot,
+    fetchDeliveryStatusMap,
 };
