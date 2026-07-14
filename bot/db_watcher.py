@@ -287,7 +287,7 @@ def _run_summary(file_path: str, company: str | None = None,
     if not msg:
         return None
     msg = msg.strip()
-    # New EquiSense format opens with "📢 *PureFrame Stock Bits!!*"; strip any
+    # New EquiSense format opens with "📢 *EquityAlerts Stock Bits!!*"; strip any
     # leading log noise by starting at the first megaphone.
     marker = msg.find("📢")
     if marker != -1:
@@ -343,7 +343,8 @@ def _format_exchange_time(raw) -> str:
 # a format change actually takes effect on filings summarised before the deploy.
 #   1 = legacy Stock-Bits-only layout
 #   2 = Stock Bits + structured Result Bits (metrics table)
-SUMMARY_FORMAT_VERSION = 2
+#   3 = EquityAlerts branding (was PureFrame), PureFrame Labs ad footer removed
+SUMMARY_FORMAT_VERSION = 3
 
 
 def _split_inline_metrics(caption: str) -> list:
@@ -652,7 +653,7 @@ def _parse_stock_bits_parts(caption: str):
 
     fm    = re.search(r"🕒[^\n]*?:\s*(.+)", text)
     filed = fm.group(1).strip() if fm else ""
-    # Branded title (📢 *PureFrame Stock/Result Bits!!*) — carried as a VARIABLE
+    # Branded title (📢 *EquityAlerts Stock/Result Bits!!*) — carried as a VARIABLE
     # value, not the template's fixed text, so it can't push the template into
     # the Marketing category.
     tm    = re.search(r"(📢[^\n]*)", text)
@@ -829,7 +830,7 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
                 if body and all(m == "—" for m in metrics):
                     metrics = [body] + ["—"] * (slots - 1)
                 params  = [
-                    title or "📢 *PureFrame Result Bits!!*",
+                    title or "📢 *EquityAlerts Result Bits!!*",
                     f"💼 {company} | {event}" if event else f"💼 {company}",
                     f"🕒 Filed on exchange: {filed}" if filed else "🕒 Filed on exchange: n/a",
                     *metrics,
@@ -848,10 +849,10 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
 
             # The branded TITLE and the 🏢/⚡/🤖 emojis ride INSIDE the variable
             # values (not the approved template's fixed text) — so the template's
-            # fixed text stays neutral/Utility while the "📢 PureFrame … Bits!!"
+            # fixed text stays neutral/Utility while the "📢 EquityAlerts … Bits!!"
             # header and markers still show. Meta's category check looks at the
             # fixed text only, so this is safe.
-            title = title or "📢 *PureFrame Stock Bits!!*"
+            title = title or "📢 *EquityAlerts Stock Bits!!*"
             if company:
                 company = f"🏢 {company}"
             # The exchange time has no variable of its own (no new template), so it

@@ -1,8 +1,8 @@
 """
-PureFrame Result Bits - PDF Financial Extractor
+EquityAlerts Result Bits - PDF Financial Extractor
 ================================================
 Extracts key financial metrics from any investor presentation PDF
-and formats them as a PureFrame-style WhatsApp message using LangChain.
+and formats them as an EquityAlerts-style WhatsApp message using LangChain.
 
 Requirements:
     pip install langchain langchain-anthropic langchain-openai langchain-google-genai pdfplumber pypdf python-dotenv
@@ -297,15 +297,7 @@ PUREFRAME_AD = (
     "For any query or product, contact us: *8459625508*"
 )
 
-# PureFrame Labs website advertisement, shown as a small footer under each alert.
-PUREFRAME_LABS_AD = (
-    "━━━━━━━━━━━━━━\n"
-    "🚀 *PureFrame Labs* — we build custom bots, dashboards & data tools.\n"
-    "🔗 https://pureframelabs.in/"
-)
-
-
-BRAND_NAME = "PureFrame"
+BRAND_NAME = "EquityAlerts"
 
 
 def _impact_hashtag(impact: str) -> str:
@@ -352,7 +344,7 @@ def _build_stock_bits_message(
     """
     Assemble the EquiSense-style 'Stock Bits' WhatsApp message:
 
-        📢 *PureFrame Stock Bits!!*
+        📢 *EquityAlerts Stock Bits!!*
 
         🏢 <company>
 
@@ -390,8 +382,6 @@ def _build_stock_bits_message(
 
     lines.append(f"You are receiving this stock update per your request on {brand_url}")
     lines.append(f"Disclaimer: {brand_url}/disclaimer")
-    lines.append("")
-    lines.append(PUREFRAME_LABS_AD)
     return "\n".join(lines)
 
 
@@ -406,7 +396,7 @@ def format_whatsapp_message(
     metrics table (Revenue / PAT / OPM …, three periods each, QoQ & YoY), instead
     of a flat summary paragraph. Layout:
 
-        📢 *PureFrame Result Bits!!*
+        📢 *EquityAlerts Result Bits!!*
 
         💼 <company> | <period> Results Out
 
@@ -659,7 +649,7 @@ def process_pdf(
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Investor PDF → PureFrame WhatsApp message"
+        description="Investor PDF → EquityAlerts WhatsApp message"
     )
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--pdf", help="Local path to investor presentation PDF")
