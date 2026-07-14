@@ -35,6 +35,11 @@ const userCompanyRoutes =
         "./routes/userCompanyRoutes"
     );
 
+const userRoutes =
+    require(
+        "./routes/userRoutes"
+    );
+
 const adminRoutes =
     require(
         "./admin/adminRoutes"
@@ -191,6 +196,14 @@ app.use(
     "/api/user",
 
     userCompanyRoutes
+
+);
+
+app.use(
+
+    "/api/user",
+
+    userRoutes
 
 );
 
