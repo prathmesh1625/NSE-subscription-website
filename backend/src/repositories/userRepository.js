@@ -94,42 +94,12 @@ async function deleteByMobile(
 
 }
 
-/**
- * Permanently delete a user's account by id (self-service account deletion).
- * Cascades via ON DELETE CASCADE to subscriptions, payments, and
- * user_companies (see migrations 003/004/006).
- * @returns {boolean} true if a row was deleted, false if no such user existed.
- */
-async function deleteById(
-    id
-) {
-
-    const result =
-
-        await db.query(
-
-            `
-            DELETE FROM users
-
-            WHERE id = $1
-            `,
-
-            [id]
-
-        );
-
-    return result.rowCount > 0;
-
-}
-
 module.exports = {
 
     findByMobile,
 
     create,
 
-    deleteByMobile,
-
-    deleteById
+    deleteByMobile
 
 };

@@ -4,7 +4,6 @@ import {
     verifyToken as verifyTokenApi,
     loginWithTestCredentials as loginWithTestCredentialsApi,
 } from "../api/auth.api";
-import { deleteAccount as deleteAccountApi } from "../api/user.api";
 import { setupInterceptors } from "../api/interceptor";
 
 export const AuthContext = createContext(null);
@@ -215,18 +214,6 @@ export function AuthProvider({ children }) {
         setIsAuthenticated(false);
     }
 
-    /**
-     * Permanently delete the current user's account (DPDP Act right to
-     * erasure), then clear the local session so ProtectedRoute redirects to
-     * /login. Throws on failure — the account stays intact and the local
-     * session is untouched so the caller can show an error and let the user
-     * retry.
-     */
-    async function deleteAccount() {
-        await deleteAccountApi();
-        logout();
-    }
-
     const value = {
         user,
         isAuthenticated,
@@ -238,7 +225,6 @@ export function AuthProvider({ children }) {
         register,
         verifyRegister,
         logout,
-        deleteAccount,
         MSG91_WIDGET_ID,
         MSG91_TOKEN_AUTH,
     };
