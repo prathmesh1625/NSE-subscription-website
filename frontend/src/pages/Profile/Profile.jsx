@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import { useNavigate } from "react-router-dom";
 import useAuth from "../../hooks/useAuth";
 import useApp from "../../hooks/useApp";
@@ -8,11 +8,8 @@ import Button from "../../components/ui/Button";
  * High-fidelity, mobile-first Profile and Settings View.
  */
 export function Profile() {
-    const { user, logout, deleteAccount } = useAuth();
+    const { user, logout } = useAuth();
     const { currentSubscription, selectedCompanies } = useApp();
-    const [confirmDelete, setConfirmDelete] = useState(false);
-    const [deleting, setDeleting] = useState(false);
-    const [deleteError, setDeleteError] = useState("");
     console.log(
         "CURRENT SUBSCRIPTION:",
         currentSubscription
@@ -41,22 +38,6 @@ export function Profile() {
     };
 
     const isPremium = currentSubscription?.plan_name === "PREMIUM";
-
-    /** Permanently deletes the account (DPDP Act right to erasure). */
-    const handleDeleteAccount = async () => {
-        setDeleting(true);
-        setDeleteError("");
-        try {
-            await deleteAccount();
-            // AuthContext.logout() flips isAuthenticated — ProtectedRoute
-            // redirects to /login automatically.
-        } catch (err) {
-            setDeleteError(
-                err?.response?.data?.message || err.message || "Failed to delete account."
-            );
-            setDeleting(false);
-        }
-    };
 
     return (
         <div className="space-y-6 pb-8 font-sans">
@@ -230,63 +211,6 @@ export function Profile() {
                 >
                     Sign Out Terminal Session
                 </Button>
-            </div>
-
-            {/* Danger Zone — Account Deletion (DPDP Act right to erasure) */}
-            <div className="bg-[#151921] rounded-3xl p-6 border border-red-900/40 shadow-md shadow-[#0C0E14]/40 text-left space-y-4">
-                <h3 className="text-xs font-bold text-red-400 uppercase tracking-widest border-b border-red-900/30 pb-2">
-                    Danger Zone
-                </h3>
-
-                {!confirmDelete ? (
-                    <>
-                        <p className="text-[11px] text-brand-slate leading-relaxed font-sans">
-                            Permanently delete your account and all associated data —
-                            watchlist, subscription, and payment history. This cannot be undone.
-                        </p>
-                        <Button
-                            onClick={() => setConfirmDelete(true)}
-                            variant="outline"
-                            className="w-full !text-red-400 hover:!bg-red-950/20 !border-red-900/50 font-mono text-xs uppercase"
-                        >
-                            Delete Account
-                        </Button>
-                    </>
-                ) : (
-                    <div className="space-y-3">
-                        <p className="text-[11px] text-red-300 leading-relaxed font-sans font-semibold">
-                            Are you sure? Your watchlist, subscription, and payment history
-                            will be permanently deleted. This cannot be undone.
-                        </p>
-
-                        {deleteError && (
-                            <p className="text-[11px] text-red-400 font-sans">{deleteError}</p>
-                        )}
-
-                        <div className="flex gap-3">
-                            <Button
-                                onClick={() => {
-                                    setConfirmDelete(false);
-                                    setDeleteError("");
-                                }}
-                                variant="outline"
-                                disabled={deleting}
-                                className="flex-1 font-mono text-xs uppercase"
-                            >
-                                Cancel
-                            </Button>
-                            <Button
-                                onClick={handleDeleteAccount}
-                                loading={deleting}
-                                disabled={deleting}
-                                variant="primary"
-                                className="flex-1 !bg-red-600 hover:!bg-red-500 !text-white font-mono text-xs uppercase"
-                            >
-                                Yes, Delete
-                            </Button>
-                        </div>
-                    </div>
-                )}
             </div>
         </div>
     );
