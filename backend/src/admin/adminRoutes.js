@@ -13,6 +13,7 @@ router.get("/stats/:key/detail", adminController.statDetail);
 router.get("/users", adminController.listUsers);
 router.get("/users/:id", adminController.getUser);
 router.post("/users/:id/actions/:actionKey", adminController.runAction);
+router.post("/bulk-actions/:actionKey", adminController.runBulkAction);
 router.get("/options/:key", adminController.getOptions);
 
 module.exports = router;

@@ -211,6 +211,78 @@ async function setUserCompanies(userId, companyIds) {
 }
 
 /**
+ * Bulk-adds one or more companies to EVERY user's watchlist at once, so an
+ * admin doesn't have to open each user and edit their shares one by one.
+ *
+ * This only ever *adds* — existing subscriptions are left untouched, and a
+ * company a user already tracks is skipped (ON CONFLICT DO NOTHING). It does
+ * not enforce plan company_limits: a bulk push like this is an admin
+ * broadcast, so we let it through and report how many links were created.
+ *
+ * Returns:
+ *   - addedLinks:  number of (user, company) rows actually inserted
+ *   - userCount:   total number of users the company set was applied across
+ */
+async function addCompaniesToAllUsers(companyIds) {
+    const ids = (companyIds || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id));
+
+    if (ids.length === 0) {
+        return { addedLinks: 0, userCount: 0 };
+    }
+
+    const inserted = await db.query(
+        `
+        INSERT INTO user_companies (user_id, company_id)
+        SELECT u.id, c.company_id
+        FROM users u
+        CROSS JOIN unnest($1::bigint[]) AS c(company_id)
+        ON CONFLICT (user_id, company_id) DO NOTHING
+        `,
+        [ids]
+    );
+
+    const userCountResult = await db.query(`SELECT COUNT(*)::int AS count FROM users`);
+
+    return {
+        addedLinks: inserted.rowCount,
+        userCount: userCountResult.rows[0].count,
+    };
+}
+
+/**
+ * Bulk-removes one or more companies from EVERY user's watchlist at once —
+ * the mirror of addCompaniesToAllUsers. Users who weren't tracking a given
+ * share are simply unaffected.
+ *
+ * Returns:
+ *   - removedLinks: number of (user, company) rows actually deleted
+ *   - userCount:    total number of users (for messaging)
+ */
+async function removeCompaniesFromAllUsers(companyIds) {
+    const ids = (companyIds || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id));
+
+    if (ids.length === 0) {
+        return { removedLinks: 0, userCount: 0 };
+    }
+
+    const deleted = await db.query(
+        `DELETE FROM user_companies WHERE company_id = ANY($1::bigint[])`,
+        [ids]
+    );
+
+    const userCountResult = await db.query(`SELECT COUNT(*)::int AS count FROM users`);
+
+    return {
+        removedLinks: deleted.rowCount,
+        userCount: userCountResult.rows[0].count,
+    };
+}
+
+/**
  * Upserts the user's active subscription: updates the existing ACTIVE row
  * in place if one exists, otherwise creates a new one. Also allows changing
  * the status directly (e.g. to deactivate).
@@ -387,6 +459,8 @@ module.exports = {
     getUserCompanies,
     getUserPayments,
     setUserCompanies,
+    addCompaniesToAllUsers,
+    removeCompaniesFromAllUsers,
     upsertUserSubscription,
     setPaymentRefundStatus,
     listPlans,

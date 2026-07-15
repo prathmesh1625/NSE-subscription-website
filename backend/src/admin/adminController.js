@@ -20,7 +20,44 @@ function meta(req, res) {
         // core code — only a new renderer needs to be added for a genuinely
         // new module type.
         panelModules: ["stats", "user-directory"],
-        capabilities: ["stats", "users", "actions", "options"],
+        capabilities: ["stats", "users", "actions", "options", "bulk-actions"],
+        // Product-level actions that don't target a single user. The dashboard
+        // renders these as a "Bulk actions" panel (see ARCHITECTURE.md) and
+        // POSTs them to /bulk-actions/:actionKey. Same field-spec format as the
+        // per-user `actions` below, so the dashboard reuses the same form
+        // renderer for both.
+        bulkActions: {
+            "add-companies-to-all": {
+                label: "Add shares to every user's watchlist",
+                description:
+                    "Adds the selected share(s) to every registered user at once. " +
+                    "Existing subscriptions are kept; anyone already tracking a share is skipped.",
+                submitLabel: "Add to all users",
+                fields: [
+                    {
+                        name: "companyIds",
+                        type: "multiselect",
+                        label: "Shares to add",
+                        optionsKey: "companies",
+                    },
+                ],
+            },
+            "remove-companies-from-all": {
+                label: "Remove shares from every user's watchlist",
+                description:
+                    "Removes the selected share(s) from every user who is tracking them. " +
+                    "Users who don't track a share are left unaffected. This cannot be undone.",
+                submitLabel: "Remove from all users",
+                fields: [
+                    {
+                        name: "companyIds",
+                        type: "multiselect",
+                        label: "Shares to remove",
+                        optionsKey: "companies",
+                    },
+                ],
+            },
+        },
         actions: {
             "update-companies": {
                 label: "Edit subscribed shares",
@@ -457,6 +494,67 @@ async function runAction(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/admin/v1/bulk-actions/:actionKey
+//
+// Product-level actions that apply across many users at once, rather than to
+// one user. Declared under `bulkActions` in /meta.
+// ---------------------------------------------------------------------------
+async function runBulkAction(req, res) {
+    const actionKey = req.params.actionKey;
+
+    try {
+        if (actionKey === "add-companies-to-all") {
+            const companyIds = Array.isArray(req.body.companyIds)
+                ? req.body.companyIds.map(Number)
+                : [];
+
+            if (companyIds.length === 0) {
+                return res
+                    .status(400)
+                    .json({ success: false, message: "Select at least one share to add." });
+            }
+
+            const result = await repo.addCompaniesToAllUsers(companyIds);
+
+            const shareWord = companyIds.length === 1 ? "share" : "shares";
+            return res.json({
+                success: true,
+                message:
+                    `Added ${companyIds.length} ${shareWord} across ${result.userCount} user(s) ` +
+                    `(${result.addedLinks} new subscription(s); already-tracked ones were skipped).`,
+            });
+        }
+
+        if (actionKey === "remove-companies-from-all") {
+            const companyIds = Array.isArray(req.body.companyIds)
+                ? req.body.companyIds.map(Number)
+                : [];
+
+            if (companyIds.length === 0) {
+                return res
+                    .status(400)
+                    .json({ success: false, message: "Select at least one share to remove." });
+            }
+
+            const result = await repo.removeCompaniesFromAllUsers(companyIds);
+
+            const shareWord = companyIds.length === 1 ? "share" : "shares";
+            return res.json({
+                success: true,
+                message:
+                    `Removed ${companyIds.length} ${shareWord} from every user's watchlist ` +
+                    `(${result.removedLinks} subscription(s) removed).`,
+            });
+        }
+
+        return res.status(400).json({ success: false, message: `Unknown bulk action: ${actionKey}` });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: "Bulk action failed" });
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/v1/options/:key
 // ---------------------------------------------------------------------------
 async function getOptions(req, res) {
@@ -508,5 +606,6 @@ module.exports = {
     listUsers,
     getUser,
     runAction,
+    runBulkAction,
     getOptions,
 };
