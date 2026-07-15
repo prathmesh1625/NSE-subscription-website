@@ -497,6 +497,18 @@ PORTAL_DIST = os.path.join(
     "nse-website", "subscription-portal", "frontend", "dist"
 )
 
+@app.route("/")
+def root_redirect():
+    """Bare domain (equityalerts.in) → the portal app.
+
+    The site lives under /portal (that's the URL given to Meta for app review,
+    so we can't drop it), but users keep typing just equityalerts.in and hit a
+    dead root. Send them straight to /portal. 302 (temporary) so this stays
+    reversible if a marketing landing page is ever added at the root.
+    """
+    return redirect("/portal", code=302)
+
+
 @app.route("/portal", defaults={"path": ""})
 @app.route("/portal/<path:path>")
 def serve_portal(path):
