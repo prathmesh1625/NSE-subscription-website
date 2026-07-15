@@ -409,6 +409,20 @@ async function listPlans() {
     return result.rows;
 }
 
+/**
+ * Changes how many companies/shares a plan allows (e.g. bump Premium from 25
+ * to 30). This is stored on the plan itself, not per-subscription, so it
+ * takes effect immediately for every current and future subscriber on that
+ * plan — no need to touch existing subscription rows.
+ */
+async function updatePlanCompanyLimit(planId, companyLimit) {
+    const result = await db.query(
+        `UPDATE plans SET company_limit = $1 WHERE id = $2 RETURNING *`,
+        [companyLimit, planId]
+    );
+    return result.rows[0];
+}
+
 async function searchCompanies(search, selectedIds = []) {
     const like = `%${search || ""}%`;
     const ids = (selectedIds || [])
@@ -464,6 +478,7 @@ module.exports = {
     upsertUserSubscription,
     setPaymentRefundStatus,
     listPlans,
+    updatePlanCompanyLimit,
     searchCompanies,
     getActiveSubscribers,
     normalizePhoneForBot,

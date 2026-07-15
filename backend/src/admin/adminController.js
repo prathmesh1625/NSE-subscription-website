@@ -57,6 +57,17 @@ function meta(req, res) {
                     },
                 ],
             },
+            "update-plan-limit": {
+                label: "Change a plan's share limit",
+                description:
+                    "Changes how many shares a plan allows (e.g. Premium 25 → 30). " +
+                    "Applies immediately to every current and future subscriber on that plan.",
+                submitLabel: "Update limit",
+                fields: [
+                    { name: "planId", type: "select", label: "Plan", optionsKey: "plans" },
+                    { name: "companyLimit", type: "number", label: "New share limit" },
+                ],
+            },
         },
         actions: {
             "update-companies": {
@@ -544,6 +555,28 @@ async function runBulkAction(req, res) {
                 message:
                     `Removed ${companyIds.length} ${shareWord} from every user's watchlist ` +
                     `(${result.removedLinks} subscription(s) removed).`,
+            });
+        }
+
+        if (actionKey === "update-plan-limit") {
+            const { planId, companyLimit } = req.body;
+            const limit = Number(companyLimit);
+
+            if (!planId || !Number.isFinite(limit) || limit < 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: "planId and a non-negative companyLimit are required",
+                });
+            }
+
+            const plan = await repo.updatePlanCompanyLimit(Number(planId), limit);
+            if (!plan) {
+                return res.status(404).json({ success: false, message: "Plan not found" });
+            }
+
+            return res.json({
+                success: true,
+                message: `${plan.name} plan's share limit is now ${plan.company_limit}.`,
             });
         }
 
