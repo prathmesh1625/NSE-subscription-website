@@ -171,6 +171,21 @@ def init_db():
             )
         """)
 
+        # Durable log of every WhatsApp TEMPLATE message actually sent (for the
+        # Central Dashboard's "templates sent today" stat). wamid_tracking also
+        # records channel="template", but those rows are hard-deleted ~30 minutes
+        # after Meta's delivery callback (see remove_wamid) so they can't answer
+        # "how many today" — this table is never pruned. Written from
+        # mark_batch_template_sent(), which every successful template send
+        # already calls.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS template_sends_log (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone   TEXT,
+                sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         conn.commit()
         conn.close()
     print("✅ Bot SQLite database ready.")
@@ -326,7 +341,14 @@ def can_send_batch_template(phone: str) -> bool:
 
 
 def mark_batch_template_sent(phone: str):
-    """Stamp that this user has received their single template for the current closed window."""
+    """
+    Stamp that this user has received their single template for the current
+    closed window, and append a durable entry to template_sends_log (used by
+    count_templates_sent_today for the admin dashboard). Every successful
+    template send in db_watcher.py calls this exactly once, so it doubles as
+    the one place that logs "a template was sent" without touching each call
+    site individually.
+    """
     with _lock:
         conn = get_conn()
         conn.execute("""
@@ -334,8 +356,29 @@ def mark_batch_template_sent(phone: str):
             VALUES (?, CURRENT_TIMESTAMP)
             ON CONFLICT(phone) DO UPDATE SET template_batch_at = CURRENT_TIMESTAMP
         """, (phone,))
+        conn.execute(
+            "INSERT INTO template_sends_log (phone) VALUES (?)",
+            (phone,)
+        )
         conn.commit()
         conn.close()
+
+
+def count_templates_sent_today() -> int:
+    """
+    Number of WhatsApp template messages sent since midnight (UTC — matches
+    CURRENT_TIMESTAMP's own timezone, so "today" is computed consistently).
+    Backs the Central Dashboard's "WhatsApp templates sent today" stat.
+    """
+    with _lock:
+        conn = get_conn()
+        row = conn.execute("""
+            SELECT COUNT(*) AS count
+            FROM template_sends_log
+            WHERE date(sent_at) = date('now')
+        """).fetchone()
+        conn.close()
+        return row["count"] if row else 0
 
 
 # ── Subscriptions ─────────────────────────────────────────────

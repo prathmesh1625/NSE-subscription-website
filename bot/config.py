@@ -66,6 +66,14 @@ SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 6))
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
 SUMMARY_MODEL    = os.environ.get("SUMMARY_MODEL", "gpt-4o-mini")
 
+# ── OpenAI cost visibility (Central Dashboard) ───────────────
+# A separate, more powerful "Admin API key" is required to read spend via
+# OpenAI's Costs API — the regular OPENAI_API_KEY above (used for AI
+# summaries) cannot query billing at all. Create one at
+# platform.openai.com → Organization → Admin keys. Leave blank to disable;
+# the dashboard's "OpenAI cost today" stat will just report unavailable.
+OPENAI_ADMIN_API_KEY = os.environ.get("OPENAI_ADMIN_API_KEY", "")
+
 # ── Step 5: WhatsApp Message Template (delivery OUTSIDE the 24h window) ──
 # Meta only allows pushing a PDF to a user who has NOT messaged you in the last
 # 24 hours via an APPROVED template that has a DOCUMENT header. This is what

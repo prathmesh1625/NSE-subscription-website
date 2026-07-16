@@ -76,6 +76,10 @@ services:
       - BOT_DB_PATH=/app/bot_sqlite/bot_data.db
       - PORTAL_URL=${PORTAL_URL:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Separate, more powerful Admin API key used ONLY to read OpenAI spend
+      # for the Central Dashboard's "OpenAI cost today" stat. OPENAI_API_KEY
+      # above cannot query billing. Leave unset to disable that stat card.
+      - OPENAI_ADMIN_API_KEY=${OPENAI_ADMIN_API_KEY:-}
       # Branded short download links (equityalerts.in/t/<code>). Must be the public
       # origin that reaches this bot; set "" to fall back to raw NSE URLs.
       - SHORTLINK_BASE=${SHORTLINK_BASE:-https://equityalerts.in}

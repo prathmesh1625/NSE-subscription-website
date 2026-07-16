@@ -490,6 +490,84 @@ def admin_delivery_status():
         return jsonify({"success": False, "message": "Failed to load delivery status"}), 500
 
 
+@app.route("/admin/templates-sent-today", methods=["GET"])
+def admin_templates_sent_today():
+    """
+    Count of WhatsApp TEMPLATE messages sent since midnight (UTC), for the
+    Central Dashboard's "WhatsApp templates sent today" stat. Guarded by the
+    same shared secret as /admin/delivery-status.
+    """
+    provided = request.headers.get("x-bot-admin-key", "")
+    expected = config.BOT_ADMIN_KEY
+
+    if not expected:
+        return jsonify({"success": False, "message": "Admin API is not configured on this server"}), 500
+
+    if not hmac.compare_digest(provided, expected):
+        return jsonify({"success": False, "message": "Invalid or missing x-bot-admin-key header"}), 401
+
+    try:
+        count = db.count_templates_sent_today()
+        return jsonify({"success": True, "count": count})
+    except Exception as e:
+        print(f"❌ /admin/templates-sent-today error: {e}")
+        return jsonify({"success": False, "message": "Failed to load template send count"}), 500
+
+
+@app.route("/admin/openai-cost-today", methods=["GET"])
+def admin_openai_cost_today():
+    """
+    Total OpenAI API spend so far today (UTC), via OpenAI's Costs API.
+    Requires a separate Admin API key (config.OPENAI_ADMIN_API_KEY) — the
+    regular OPENAI_API_KEY used for AI summaries cannot query billing.
+    Guarded by the same shared secret as the other /admin/* endpoints.
+    """
+    provided = request.headers.get("x-bot-admin-key", "")
+    expected = config.BOT_ADMIN_KEY
+
+    if not expected:
+        return jsonify({"success": False, "message": "Admin API is not configured on this server"}), 500
+
+    if not hmac.compare_digest(provided, expected):
+        return jsonify({"success": False, "message": "Invalid or missing x-bot-admin-key header"}), 401
+
+    admin_key = config.OPENAI_ADMIN_API_KEY
+    if not admin_key:
+        return jsonify({"success": False, "message": "OPENAI_ADMIN_API_KEY is not configured"}), 500
+
+    try:
+        import requests
+        from datetime import datetime, timezone
+
+        start_of_day = int(
+            datetime.now(timezone.utc)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+        )
+
+        resp = requests.get(
+            "https://api.openai.com/v1/organization/costs",
+            headers={"Authorization": f"Bearer {admin_key}"},
+            params={"start_time": start_of_day, "bucket_width": "1d", "limit": 1},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        total = 0.0
+        currency = "usd"
+        for bucket in data.get("data", []):
+            for result in bucket.get("results", []):
+                amount = result.get("amount") or {}
+                total += float(amount.get("value") or 0)
+                currency = amount.get("currency", currency)
+
+        return jsonify({"success": True, "costToday": round(total, 4), "currency": currency})
+    except Exception as e:
+        print(f"❌ /admin/openai-cost-today error: {e}")
+        return jsonify({"success": False, "message": "Failed to load OpenAI cost"}), 500
+
+
 # ── Serve React portal (static files) ────────────────────────
 
 PORTAL_DIST = os.path.join(

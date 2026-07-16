@@ -474,6 +474,58 @@ async function fetchDeliveryStatusMap() {
     }
 }
 
+/**
+ * Number of WhatsApp template messages the bot has sent today, for the
+ * "WhatsApp templates sent today" stat card. Fails soft — returns null if
+ * the bot is unreachable/unconfigured, same convention as
+ * fetchDeliveryStatusMap, so the rest of the stats keep working.
+ */
+async function fetchTemplatesSentToday() {
+    const baseUrl = process.env.BOT_ADMIN_URL;
+    const apiKey = process.env.BOT_ADMIN_KEY;
+
+    if (!baseUrl || !apiKey) {
+        return null;
+    }
+
+    try {
+        const response = await axios.get(`${baseUrl}/admin/templates-sent-today`, {
+            headers: { "x-bot-admin-key": apiKey },
+            timeout: 5000,
+        });
+        return response.data.count;
+    } catch (err) {
+        console.error("Failed to fetch templates-sent-today from bot:", err.message);
+        return null;
+    }
+}
+
+/**
+ * Today's OpenAI API spend (used for the AI summaries in filing alerts), for
+ * the "OpenAI cost today" stat card. Fails soft — returns null if the bot is
+ * unreachable/unconfigured or OPENAI_ADMIN_API_KEY isn't set on it, same
+ * convention as fetchDeliveryStatusMap/fetchTemplatesSentToday.
+ */
+async function fetchOpenAiCostToday() {
+    const baseUrl = process.env.BOT_ADMIN_URL;
+    const apiKey = process.env.BOT_ADMIN_KEY;
+
+    if (!baseUrl || !apiKey) {
+        return null;
+    }
+
+    try {
+        const response = await axios.get(`${baseUrl}/admin/openai-cost-today`, {
+            headers: { "x-bot-admin-key": apiKey },
+            timeout: 10000,
+        });
+        return { cost: response.data.costToday, currency: response.data.currency };
+    } catch (err) {
+        console.error("Failed to fetch OpenAI cost from bot:", err.message);
+        return null;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Option lists (for building forms in the dashboard)
 // ---------------------------------------------------------------------------
@@ -560,4 +612,6 @@ module.exports = {
     getActiveSubscribers,
     normalizePhoneForBot,
     fetchDeliveryStatusMap,
+    fetchTemplatesSentToday,
+    fetchOpenAiCostToday,
 };

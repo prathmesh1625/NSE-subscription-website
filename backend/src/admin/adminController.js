@@ -154,6 +154,8 @@ async function stats(req, res) {
     try {
         const row = await repo.getStats();
         const { receiving, notReceiving } = await getPdfDeliveryCounts();
+        const templatesSentToday = await repo.fetchTemplatesSentToday();
+        const openAiCost = await repo.fetchOpenAiCostToday();
 
         res.json({
             success: true,
@@ -211,6 +213,23 @@ async function stats(req, res) {
                     format: "number",
                     // Drill-down into exactly who, via GET /stats/pdf-issues/detail below.
                     detailKey: "pdf-issues",
+                },
+                {
+                    key: "templates_sent_today",
+                    label: "WhatsApp templates sent today",
+                    // null (bot unreachable/unconfigured) reports as 0, same
+                    // fail-soft convention as the PDF-delivery stats above.
+                    value: templatesSentToday !== null && templatesSentToday !== undefined ? templatesSentToday : 0,
+                    format: "number",
+                },
+                {
+                    key: "openai_cost_today",
+                    label: `OpenAI cost today (${((openAiCost && openAiCost.currency) || "usd").toUpperCase()})`,
+                    // Left as null (not defaulted to 0) when unreachable/not
+                    // configured — the dashboard renders that as "—", which is
+                    // more honest than implying zero spend.
+                    value: openAiCost ? openAiCost.cost : null,
+                    format: "number",
                 },
             ],
         });
