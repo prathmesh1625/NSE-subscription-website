@@ -127,6 +127,48 @@ async function removeCompany(
 
 }
 
+/**
+ * Adds every company currently flagged as part of the "default watchlist"
+ * (see migration 002 and adminRepository's addCompaniesToAllUsers) to a
+ * brand-new user's own watchlist. Called right after a user row is first
+ * created — real OTP signup (authController.verifyToken) and admin-created
+ * users (adminController's create-user bulk action) both go through this,
+ * so either path ends up with the same starter companies.
+ */
+async function seedDefaultCompanies(
+    userId
+) {
+
+    await db.query(
+
+        `
+        INSERT INTO user_companies (
+
+            user_id,
+            company_id
+
+        )
+
+        SELECT
+
+            $1,
+            c.id
+
+        FROM companies c
+
+        WHERE c.is_default_watchlist = TRUE
+
+        ON CONFLICT (user_id, company_id) DO NOTHING
+        `,
+
+        [
+            userId
+        ]
+
+    );
+
+}
+
 async function alreadySelected(
     userId,
     companyId
@@ -168,6 +210,8 @@ module.exports = {
     getUserCompanies,
 
     countUserCompanies,
+
+    seedDefaultCompanies,
 
     addCompany,
 

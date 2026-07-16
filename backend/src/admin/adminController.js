@@ -1,7 +1,22 @@
 const repo = require("./adminRepository");
+const userCompanyRepository = require("../repositories/userCompanyRepository");
 
 const PRODUCT_KEY = "nse-subscription";
 const PRODUCT_NAME = "NSE Bulk / Block Deal Alerts";
+
+/**
+ * Normalizes an Indian mobile number to its 10-digit form, same rule the
+ * real OTP signup flow uses (see authController.js) — kept as its own copy
+ * here since that one isn't exported, and this module has no other reason
+ * to depend on the auth controller.
+ */
+function normalizeMobile(input) {
+    if (typeof input !== "string" && typeof input !== "number") return null;
+    const digits = String(input).replace(/\D/g, "");
+    if (digits.length === 10) return digits;
+    if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
+    return null;
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/admin/v1/meta
@@ -68,6 +83,18 @@ function meta(req, res) {
                     { name: "companyLimit", type: "number", label: "New share limit" },
                 ],
             },
+            "create-user": {
+                label: "Add a new user",
+                description:
+                    "Creates a new user directly, without them needing to sign up themselves " +
+                    "(e.g. for an offline/manual sale). Search for them in the directory " +
+                    "afterwards to set up their subscription and tracked shares.",
+                submitLabel: "Create user",
+                fields: [
+                    { name: "name", type: "text", label: "Name (optional)" },
+                    { name: "mobile", type: "text", label: "Mobile number (10 digits)" },
+                ],
+            },
         },
         actions: {
             "update-companies": {
@@ -94,6 +121,14 @@ function meta(req, res) {
                     { name: "startDate", type: "date", label: "Start date" },
                     { name: "endDate", type: "date", label: "End date" },
                 ],
+            },
+            "update-share-limit": {
+                label: "Change this user's share limit",
+                description:
+                    "Overrides this user's share limit independent of their plan's default " +
+                    "(e.g. bump just this one Premium user from 25 to 30). Clear the field to " +
+                    "fall back to the plan's default limit again.",
+                fields: [{ name: "shareLimit", type: "number", label: "Share limit" }],
             },
             "mark-refund": {
                 label: "Update refund status",
@@ -330,6 +365,11 @@ async function getUser(req, res) {
         const payments = await repo.getUserPayments(userId);
 
         const activeSub = subs.find((s) => s.status === "ACTIVE");
+        // A per-user override (see repo.setUserShareLimitOverride) takes
+        // priority over the plan's own default when present.
+        const effectiveLimit = activeSub
+            ? activeSub.company_limit_override ?? activeSub.company_limit
+            : null;
 
         const sections = [
             {
@@ -357,9 +397,21 @@ async function getUser(req, res) {
                           Status: activeSub.status,
                           "Start date": activeSub.start_date,
                           "End date": activeSub.end_date,
-                          "Share limit": activeSub.company_limit,
                       }
                     : { Status: "No subscription yet" },
+            },
+            {
+                key: "share_limit",
+                title: "Share limit",
+                type: "keyvalue",
+                editable: true,
+                actionKey: "update-share-limit",
+                data: activeSub
+                    ? {
+                          "Share limit": effectiveLimit,
+                          "Plan default": activeSub.company_limit,
+                      }
+                    : { Status: "No active subscription" },
             },
             {
                 key: "companies",
@@ -371,7 +423,7 @@ async function getUser(req, res) {
                         id: c.id,
                         label: `${c.company_name} (${c.symbol})`,
                     })),
-                    limit: activeSub ? activeSub.company_limit : null,
+                    limit: effectiveLimit,
                 },
             },
             {
@@ -453,8 +505,40 @@ async function runAction(req, res) {
                 success: true,
                 message: `Updated to ${result.count} share(s).`,
                 warning: result.exceedsLimit
-                    ? `This exceeds the user's plan limit of ${result.limit}.`
+                    ? `This exceeds the user's share limit of ${result.limit}.`
                     : null,
+            });
+        }
+
+        if (actionKey === "update-share-limit") {
+            const raw = req.body.shareLimit;
+            let overrideValue = null;
+
+            if (raw !== "" && raw !== null && raw !== undefined) {
+                const parsed = Number(raw);
+                if (!Number.isFinite(parsed) || parsed < 0) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "Share limit must be a non-negative number.",
+                    });
+                }
+                overrideValue = parsed;
+            }
+
+            const result = await repo.setUserShareLimitOverride(userId, overrideValue);
+            if (!result) {
+                return res.status(400).json({
+                    success: false,
+                    message: "This user has no active subscription to set a share limit on.",
+                });
+            }
+
+            return res.json({
+                success: true,
+                message:
+                    overrideValue === null
+                        ? `Share limit reverted to the ${result.planName} plan default (${result.effectiveLimit}).`
+                        : `Share limit for this user set to ${overrideValue}.`,
             });
         }
 
@@ -577,6 +661,39 @@ async function runBulkAction(req, res) {
             return res.json({
                 success: true,
                 message: `${plan.name} plan's share limit is now ${plan.company_limit}.`,
+            });
+        }
+
+        if (actionKey === "create-user") {
+            const mobile = normalizeMobile(req.body.mobile);
+            if (!mobile) {
+                return res.status(400).json({
+                    success: false,
+                    message: "A valid 10-digit mobile number is required.",
+                });
+            }
+
+            const rawName = req.body.name;
+            const name = typeof rawName === "string" && rawName.trim() ? rawName.trim().slice(0, 100) : null;
+
+            const existing = await repo.findUserByMobile(mobile);
+            if (existing) {
+                return res.status(400).json({
+                    success: false,
+                    message: `A user with mobile ${mobile} already exists — search for them in the directory instead.`,
+                });
+            }
+
+            const user = await repo.createUser(name, mobile);
+            // Same starter watchlist a real signup gets — see
+            // authController.verifyToken and migration 002.
+            await userCompanyRepository.seedDefaultCompanies(user.id);
+
+            return res.json({
+                success: true,
+                message:
+                    `Created user "${user.name || mobile}" (${user.mobile}). ` +
+                    `Search for them in the directory to set up their subscription and shares.`,
             });
         }
 

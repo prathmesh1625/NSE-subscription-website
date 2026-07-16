@@ -3,6 +3,11 @@ const userRepository =
         "../repositories/userRepository"
     );
 
+const userCompanyRepository =
+    require(
+        "../repositories/userCompanyRepository"
+    );
+
 const jwtUtil =
     require(
         "../utils/jwt"
@@ -203,6 +208,15 @@ async function verifyToken(
                     mobile
                 );
 
+            // Give every brand-new user the same starter watchlist the admin
+            // has broadcast to everyone via the dashboard (see
+            // adminRepository.addCompaniesToAllUsers) — so they land on
+            // their dashboard after login with those companies already
+            // tracked, not an empty list.
+            await userCompanyRepository.seedDefaultCompanies(
+                user.id
+            );
+
         }
 
         // 3. Issue internal session JWT
@@ -304,6 +318,10 @@ async function loginWithTestCredentials(
                 "Razorpay Test User",
                 TEMP_TEST_MOBILE
             );
+
+        await userCompanyRepository.seedDefaultCompanies(
+            user.id
+        );
 
         const token =
             jwtUtil.generateToken(user);

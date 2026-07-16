@@ -87,6 +87,32 @@ async function searchUsers(search, page, pageSize) {
     };
 }
 
+/**
+ * Looks up a user by their exact normalized mobile number — used to check
+ * for an existing account before creating a new one from the admin
+ * dashboard (see createUser below), mirroring the same check the real
+ * signup flow does in authController.verifyToken.
+ */
+async function findUserByMobile(mobile) {
+    const result = await db.query(`SELECT id, name, mobile FROM users WHERE mobile = $1`, [mobile]);
+    return result.rows[0];
+}
+
+/**
+ * Creates a bare user record directly from the admin dashboard, without
+ * them going through mobile+OTP signup themselves — e.g. for an offline
+ * sale. Same shape as what authController.verifyToken creates on a
+ * first-time login. The admin can then set their subscription and tracked
+ * shares from the user's profile using the existing per-user actions.
+ */
+async function createUser(name, mobile) {
+    const result = await db.query(
+        `INSERT INTO users (name, mobile) VALUES ($1, $2) RETURNING id, name, mobile, created_at`,
+        [name, mobile]
+    );
+    return result.rows[0];
+}
+
 async function getUserProfile(userId) {
     const result = await db.query(
         `SELECT id, name, mobile, created_at FROM users WHERE id = $1`,
@@ -104,6 +130,7 @@ async function getUserSubscriptionHistory(userId) {
             s.start_date,
             s.end_date,
             s.created_at,
+            s.company_limit_override,
             p.id   AS plan_id,
             p.name AS plan_name,
             p.price,
@@ -195,7 +222,7 @@ async function setUserCompanies(userId, companyIds) {
 
     const activeSub = await db.query(
         `
-        SELECT p.company_limit
+        SELECT s.company_limit_override, p.company_limit
         FROM subscriptions s
         JOIN plans p ON p.id = s.plan_id
         WHERE s.user_id = $1 AND s.status = 'ACTIVE'
@@ -204,10 +231,46 @@ async function setUserCompanies(userId, companyIds) {
         [userId]
     );
 
-    const limit = activeSub.rows[0] ? activeSub.rows[0].company_limit : null;
+    const sub = activeSub.rows[0];
+    // A per-user override (see setUserShareLimitOverride) takes priority over
+    // the plan's own default — that's the whole point of setting one.
+    const limit = sub ? (sub.company_limit_override ?? sub.company_limit) : null;
     const exceedsLimit = limit !== null && companyIds.length > limit;
 
     return { count: companyIds.length, limit, exceedsLimit };
+}
+
+/**
+ * Sets (or clears, with `overrideValue = null`) a per-user override of the
+ * share/company limit, independent of their plan's default — e.g. bumping
+ * one Premium user from 25 to 30 without touching the Premium plan itself.
+ * Only applies to the user's current ACTIVE subscription; returns null if
+ * they don't have one.
+ */
+async function setUserShareLimitOverride(userId, overrideValue) {
+    const existing = await db.query(
+        `
+        SELECT s.id, p.name AS plan_name, p.company_limit
+        FROM subscriptions s
+        JOIN plans p ON p.id = s.plan_id
+        WHERE s.user_id = $1 AND s.status = 'ACTIVE'
+        ORDER BY s.id DESC LIMIT 1
+        `,
+        [userId]
+    );
+
+    const sub = existing.rows[0];
+    if (!sub) return null;
+
+    await db.query(
+        `UPDATE subscriptions SET company_limit_override = $1 WHERE id = $2`,
+        [overrideValue, sub.id]
+    );
+
+    return {
+        planName: sub.plan_name,
+        effectiveLimit: overrideValue !== null ? overrideValue : sub.company_limit,
+    };
 }
 
 /**
@@ -243,6 +306,12 @@ async function addCompaniesToAllUsers(companyIds) {
         [ids]
     );
 
+    // These companies also become part of the "default watchlist" every NEW
+    // user is seeded with on signup (see userCompanyRepository.seedDefaultCompanies)
+    // — so this action stays true for anyone who joins after it runs, not
+    // just users who already existed at the time.
+    await db.query(`UPDATE companies SET is_default_watchlist = TRUE WHERE id = ANY($1::bigint[])`, [ids]);
+
     const userCountResult = await db.query(`SELECT COUNT(*)::int AS count FROM users`);
 
     return {
@@ -273,6 +342,11 @@ async function removeCompaniesFromAllUsers(companyIds) {
         `DELETE FROM user_companies WHERE company_id = ANY($1::bigint[])`,
         [ids]
     );
+
+    // Mirror of the flag set in addCompaniesToAllUsers — a company removed
+    // from everyone should also stop being seeded into anyone who signs up
+    // afterwards.
+    await db.query(`UPDATE companies SET is_default_watchlist = FALSE WHERE id = ANY($1::bigint[])`, [ids]);
 
     const userCountResult = await db.query(`SELECT COUNT(*)::int AS count FROM users`);
 
@@ -468,11 +542,14 @@ module.exports = {
     getStats,
     getSuccessfulPayments,
     searchUsers,
+    findUserByMobile,
+    createUser,
     getUserProfile,
     getUserSubscriptionHistory,
     getUserCompanies,
     getUserPayments,
     setUserCompanies,
+    setUserShareLimitOverride,
     addCompaniesToAllUsers,
     removeCompaniesFromAllUsers,
     upsertUserSubscription,
