@@ -22,6 +22,7 @@ export function Register() {
     const [step, setStep] = useState("DETAILS");
 
     const [name, setName]                   = useState("");
+    const [countryCode, setCountryCode]     = useState("+91");
     const [mobile, setMobile]               = useState("");
     const [otp, setOtp]                     = useState("");
     const [loading, setLoading]             = useState(false);
@@ -35,7 +36,7 @@ export function Register() {
     // Holds the MSG91 access-token resolved by the widget on OTP success
     const accessTokenRef = useRef(null);
 
-    const validateMobile = (num) => /^\d{10}$/.test(num);
+    const validateMobile = (num) => /^\d{7,15}$/.test(num);
 
     /**
      * Phase 1: Validate inputs → initialise the MSG91 widget → deliver OTP via SMS.
@@ -56,7 +57,7 @@ export function Register() {
             setMobileError("Mobile number is required");
             isValid = false;
         } else if (!validateMobile(mobile)) {
-            setMobileError("Please enter a valid 10-digit number");
+            setMobileError("Please enter a valid mobile number (7-15 digits)");
             isValid = false;
         }
 
@@ -74,8 +75,9 @@ export function Register() {
 
             // Trigger OTP delivery via SMS
             if (typeof window.sendOtp === "function") {
+                const pureCode = countryCode.replace(/\D/g, "");
                 window.sendOtp(
-                    `91${mobile}`,
+                    `${pureCode}${mobile}`,
                     () => {},
                     (err) => console.warn("sendOtp delivery warning:", err)
                 );
@@ -150,7 +152,8 @@ export function Register() {
                 throw new Error("Verification token not received. Please try again.");
             }
 
-            await verifyRegister(name, mobile, accessTokenRef.current);
+            const pureCode = countryCode.replace(/\D/g, "");
+            await verifyRegister(name, `${pureCode}${mobile}`, accessTokenRef.current);
 
             // No navigate() call here on purpose: setting isAuthenticated
             // (inside verifyRegister) causes PublicRoute, which still wraps
@@ -244,23 +247,44 @@ export function Register() {
                                     }
                                 />
 
-                                <Input
-                                    label="Mobile Number"
-                                    value={mobile}
-                                    onChange={(e) => {
-                                        setMobile(e.target.value.replace(/\D/g, ""));
-                                        setMobileError("");
-                                    }}
-                                    placeholder="Enter your 10-digit number"
-                                    type="tel"
-                                    maxLength="10"
-                                    error={mobileError}
-                                    icon={
-                                        <svg className="w-5 h-5 text-brand-slate" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.94.725l.548 2.2a1 1 0 01-.321.988l-1.305.98a10.582 10.582 0 004.872 4.872l.98-1.305a1 1 0 01.988-.321l2.2.548a1 1 0 01.725.94V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-                                        </svg>
-                                    }
-                                />
+                                <div className="flex flex-col gap-1.5">
+                                    <label className="text-[13px] font-bold text-brand-slate uppercase tracking-wider pl-1">
+                                        Mobile Number
+                                    </label>
+                                    <div className="flex gap-2">
+                                        <div className="w-[85px] shrink-0">
+                                            <Input
+                                                value={countryCode}
+                                                onChange={(e) => {
+                                                    let val = e.target.value.replace(/[^\d+]/g, '');
+                                                    if (val && !val.startsWith('+')) val = '+' + val;
+                                                    setCountryCode(val);
+                                                }}
+                                                placeholder="+91"
+                                                className="text-center px-1"
+                                                maxLength="5"
+                                            />
+                                        </div>
+                                        <div className="flex-1">
+                                            <Input
+                                                value={mobile}
+                                                onChange={(e) => {
+                                                    setMobile(e.target.value.replace(/\D/g, ""));
+                                                    setMobileError("");
+                                                }}
+                                                placeholder="Enter your mobile number"
+                                                type="tel"
+                                                maxLength="15"
+                                                error={mobileError}
+                                                icon={
+                                                    <svg className="w-5 h-5 text-brand-slate" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.94.725l.548 2.2a1 1 0 01-.321.988l-1.305.98a10.582 10.582 0 004.872 4.872l.98-1.305a1 1 0 01.988-.321l2.2.548a1 1 0 01.725.94V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                                                    </svg>
+                                                }
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
 
                                 <div className="pt-2">
                                     <Button
@@ -286,7 +310,7 @@ export function Register() {
                                         Verifying phone connection:
                                     </span>
                                     <span className="block text-sm font-bold text-brand-light font-mono">
-                                        +91 {mobile}
+                                        {countryCode} {mobile}
                                     </span>
                                 </div>
 

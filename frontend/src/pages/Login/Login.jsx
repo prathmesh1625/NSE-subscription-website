@@ -52,6 +52,7 @@ export function Login() {
     };
     // ── end temporary block ────────────────────────────────────────────────
 
+    const [countryCode, setCountryCode]     = useState("+91");
     const [mobile, setMobile]               = useState("");
     const [otp, setOtp]                     = useState("");
     const [loading, setLoading]             = useState(false);
@@ -62,7 +63,7 @@ export function Login() {
     // Holds the MSG91 access-token that the widget delivers once OTP is verified
     const accessTokenRef = useRef(null);
 
-    const validateMobile = (num) => /^\d{10}$/.test(num);
+    const validateMobile = (num) => /^\d{7,15}$/.test(num);
 
     /**
      * Phase 1: Initialise the MSG91 widget → deliver OTP via SMS.
@@ -79,7 +80,7 @@ export function Login() {
             return;
         }
         if (!validateMobile(mobile)) {
-            setError("Please enter a valid 10-digit mobile number");
+            setError("Please enter a valid mobile number (7-15 digits)");
             return;
         }
 
@@ -98,8 +99,9 @@ export function Login() {
 
             // Trigger OTP delivery via SMS (channel '11')
             if (typeof window.sendOtp === "function") {
+                const pureCode = countryCode.replace(/\D/g, "");
                 window.sendOtp(
-                    `91${mobile}`,
+                    `${pureCode}${mobile}`,
                     () => {},   // success handled by widget's main success callback
                     (err) => console.warn("sendOtp delivery warning:", err)
                 );
@@ -176,7 +178,8 @@ export function Login() {
                 throw new Error("Verification token not received. Please try again.");
             }
 
-            await verifyLogin(mobile, accessTokenRef.current);
+            const pureCode = countryCode.replace(/\D/g, "");
+            await verifyLogin(`${pureCode}${mobile}`, accessTokenRef.current);
 
             // No navigate() call here on purpose: setting isAuthenticated
             // (inside verifyLogin) causes PublicRoute, which still wraps
@@ -247,23 +250,44 @@ export function Login() {
                     <div className="mt-8">
                         {step === "MOBILE" ? (
                             <form onSubmit={handleSendOtp} className="space-y-5">
-                                <Input
-                                    label="Mobile Number"
-                                    value={mobile}
-                                    onChange={(e) => {
-                                        setMobile(e.target.value.replace(/\D/g, ""));
-                                        setError("");
-                                    }}
-                                    placeholder="Enter your 10-digit number"
-                                    type="tel"
-                                    maxLength="10"
-                                    error={error}
-                                    icon={
-                                        <svg className="w-5 h-5 text-brand-slate" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.94.725l.548 2.2a1 1 0 01-.321.988l-1.305.98a10.582 10.582 0 004.872 4.872l.98-1.305a1 1 0 01.988-.321l2.2.548a1 1 0 01.725.94V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-                                        </svg>
-                                    }
-                                />
+                                <div className="flex flex-col gap-1.5">
+                                    <label className="text-[13px] font-bold text-brand-slate uppercase tracking-wider pl-1">
+                                        Mobile Number
+                                    </label>
+                                    <div className="flex gap-2">
+                                        <div className="w-[85px] shrink-0">
+                                            <Input
+                                                value={countryCode}
+                                                onChange={(e) => {
+                                                    let val = e.target.value.replace(/[^\d+]/g, '');
+                                                    if (val && !val.startsWith('+')) val = '+' + val;
+                                                    setCountryCode(val);
+                                                }}
+                                                placeholder="+91"
+                                                className="text-center px-1"
+                                                maxLength="5"
+                                            />
+                                        </div>
+                                        <div className="flex-1">
+                                            <Input
+                                                value={mobile}
+                                                onChange={(e) => {
+                                                    setMobile(e.target.value.replace(/\D/g, ""));
+                                                    setError("");
+                                                }}
+                                                placeholder="Enter your mobile number"
+                                                type="tel"
+                                                maxLength="15"
+                                                error={error}
+                                                icon={
+                                                    <svg className="w-5 h-5 text-brand-slate" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.94.725l.548 2.2a1 1 0 01-.321.988l-1.305.98a10.582 10.582 0 004.872 4.872l.98-1.305a1 1 0 01.988-.321l2.2.548a1 1 0 01.725.94V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                                                    </svg>
+                                                }
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
 
                                 <Button
                                     type="submit"
@@ -287,7 +311,7 @@ export function Login() {
                                         Verifying connection for:
                                     </span>
                                     <span className="block text-sm font-bold text-brand-light font-mono">
-                                        +91 {mobile}
+                                        {countryCode} {mobile}
                                     </span>
                                 </div>
 

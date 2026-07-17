@@ -28,29 +28,27 @@ function normalizeMobile(
         typeof input !== "string" &&
         typeof input !== "number"
     ) {
-
         return null;
-
     }
 
     const digits =
         String(input).replace(/\D/g, "");
 
-    if (
-        digits.length === 10
-    ) {
-
-        return digits;
-
-    }
-
+    // Backward compatibility: existing Indian users are stored as 10 digits
+    // without the 91 country code.
     if (
         digits.length === 12 &&
         digits.startsWith("91")
     ) {
-
         return digits.slice(2);
+    }
 
+    // Allow valid international numbers (7 to 15 digits)
+    if (
+        digits.length >= 7 &&
+        digits.length <= 15
+    ) {
+        return digits;
     }
 
     return null;
@@ -157,7 +155,7 @@ async function verifyToken(
                 .status(400)
                 .json({
                     success: false,
-                    message: "A valid 10-digit mobile number is required",
+                    message: "A valid mobile number is required",
                 });
         }
 
