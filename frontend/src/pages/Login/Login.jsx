@@ -115,9 +115,14 @@ export function Login() {
             tokenPromise.then((token) => {
                 accessTokenRef.current = token;
             }).catch((err) => {
+                // Stale widget failures (from re-initialization) are already
+                // filtered out in AuthContext via the generation counter —
+                // they never reach here. Only genuine failures arrive.
                 console.error("Widget verification failed:", err);
+                // Don't bounce back to MOBILE if the user already received
+                // the OTP and is on the OTP step — let them retry verification.
+                // Only show the error; the user can go back manually if needed.
                 setError(err?.message || "OTP verification failed. Please try again.");
-                setStep("MOBILE");
             });
 
         } catch (err) {
