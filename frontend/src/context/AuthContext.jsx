@@ -1,4 +1,4 @@
-import { createContext, useState, useEffect } from "react";
+import { createContext, useState, useEffect, useRef } from "react";
 import { getToken, getUser, setToken, setUser, clearAuth } from "../utils/storage";
 import {
     verifyToken as verifyTokenApi,
@@ -63,6 +63,17 @@ export function AuthProvider({ children }) {
     // ── Helpers ───────────────────────────────────────────────────────────
 
     /**
+     * Generation counter for widget initializations. Incremented each time
+     * initMsg91Widget is called. When a stale (older generation) widget fires
+     * its failure callback we silently ignore it — this prevents the
+     * "Something went wrong, Please try again" error that MSG91 raises on
+     * the *previous* widget instance when initSendOTP() is called again.
+     *
+     * Uses useRef so the counter persists across React re-renders.
+     */
+    const widgetGenerationRef = useRef(0);
+
+    /**
      * Wait until window.initSendOTP is available (async script load).
      * @param {number} [attempt=0]
      * @returns {Promise<void>}
@@ -84,10 +95,19 @@ export function AuthProvider({ children }) {
      * Resolves with the MSG91 access-token on success,
      * or rejects with an error on failure.
      *
+     * Each call increments a generation counter. If the widget fires the
+     * failure callback for a stale generation (because initSendOTP was
+     * called again and the old widget instance errors out) we silently
+     * swallow it instead of propagating the error to the UI.
+     *
      * @param {string} mobile - 10-digit mobile number (country code will be prepended)
      * @returns {Promise<string>} MSG91 access-token
      */
     function initMsg91Widget(mobile) {
+        // Bump the generation so any in-flight widget from a previous call
+        // is considered stale.
+        const myGeneration = ++widgetGenerationRef.current;
+
         return new Promise(async (resolve, reject) => {
             try {
                 await waitForWidget();
@@ -107,6 +127,16 @@ export function AuthProvider({ children }) {
                     resolve(data.message);
                 },
                 failure: (error) => {
+                    // If a newer widget has been initialized since this one,
+                    // this failure is from the stale/replaced instance —
+                    // silently ignore it to avoid confusing error messages.
+                    if (myGeneration !== widgetGenerationRef.current) {
+                        console.debug(
+                            `[MSG91] Ignoring stale widget failure (gen ${myGeneration}, current ${widgetGenerationRef.current}):`,
+                            error
+                        );
+                        return;
+                    }
                     reject(
                         new Error(
                             (typeof error === "string" ? error : error?.message) ||
