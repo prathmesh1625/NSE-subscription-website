@@ -251,8 +251,10 @@ TEMPLATE_RESULT_PARAM_COUNT  = 15
 #
 # Leave a name EMPTY until that template is APPROVED — the code falls back to
 # the old behaviour for that count, so deploying this early is safe.
-TEMPLATE_RESULT_NAME_1 = os.environ.get("TEMPLATE_RESULT_NAME_1", "")
-TEMPLATE_RESULT_NAME_2 = os.environ.get("TEMPLATE_RESULT_NAME_2", "")
+# _1 and _2 are APPROVED and live. _3 stays empty on purpose: 3-metric results
+# use the already-approved fixed-heading TEMPLATE_RESULT_NAME above.
+TEMPLATE_RESULT_NAME_1 = os.environ.get("TEMPLATE_RESULT_NAME_1", "nse_result_bits_1")
+TEMPLATE_RESULT_NAME_2 = os.environ.get("TEMPLATE_RESULT_NAME_2", "nse_result_bits_2")
 TEMPLATE_RESULT_NAME_3 = os.environ.get("TEMPLATE_RESULT_NAME_3", "")
 
 
