@@ -347,90 +347,116 @@ def _format_exchange_time(raw) -> str:
 SUMMARY_FORMAT_VERSION = 3
 
 
-def _split_inline_metrics(caption: str) -> list:
+
+# The results template hard-codes its three metric HEADINGS in the fixed text
+# ("Revenue (REV):", "Profit After Tax (PAT):", "Operating Profit Margin (OPM):")
+# — that fixed text is what keeps the template inside Meta's variables-to-length
+# budget and out of the Marketing category (see config.TEMPLATE_RESULT_NAME).
+# The price is that whatever the extractor found has to be matched ONTO those
+# three slots; metrics outside them (EBITDA, EPS …) are dropped from the
+# closed-window template. The free-form text alert still carries all of them.
+RESULT_TEMPLATE_SLOTS = (
+    ("REV", ("revenue", "total income", "net sales", "turnover",
+             "income from operations")),
+    ("PAT", ("profit after tax", "net profit", "profit for the period")),
+    ("OPM", ("operating profit margin", "operating margin", "ebitda margin")),
+)
+
+
+def _metric_block(head: str, periods: list, trend: str) -> dict:
+    """Split a metric heading ("Revenue from Operations (REV)") into name + short."""
+    sm = re.search(r"\(([A-Za-z]{2,})\)\s*$", head)
+    return {
+        "short":   (sm.group(1).upper() if sm else ""),
+        "name":    re.sub(r"\s*\([A-Za-z]{2,}\)\s*$", "", head).strip(),
+        "periods": periods,
+        "trend":   trend,
+    }
+
+
+def _parse_metric_blocks(caption: str) -> list:
     """
-    Newer summaries put the whole metrics table INLINE on the 🤖 line (one run of
-    text) rather than as a "📊 Key Metrics" block. Split that run back into one
-    compact line per metric so each fills its own results-template slot:
+    Parse the "\U0001F4CA Key Metrics" table into one dict per metric:
 
-        "Revenue from operations (REV): ₹34,579 Cr · 🟢 +1.75% QoQ, 🟢 +13.36% YoY"
+        {"short": "REV", "name": "Revenue from Operations",
+         "periods": ["Jun 2026: ₹858.67 Cr", "Mar 2026: ₹857.77 Cr", ...],
+         "trend":   "\U0001F7E2 0.10% QoQ, \U0001F680 37.94% YoY"}
 
-    Returns [] when the body has no "<name> (ABBR): … YoY" metric blocks.
+    Handles BOTH the table layout and the newer inline \U0001F916 layout — the
+    inline one only carries the LATEST period per metric, so the older periods
+    come back missing and the caller pads them.
     """
-    bm = re.search(r"🤖\s*(.+?)(?:\n\s*🔗|\n\s*📎|\n\s*You are receiving|$)",
-                   caption or "", re.DOTALL)
-    body = re.sub(r"\s+", " ", (bm.group(1) if bm else (caption or ""))).strip()
-
-    lines = []
-    for b in re.findall(r"[A-Za-z][A-Za-z0-9 ./&()'-]*?\([A-Z]{2,}\):.*?YoY", body):
-        segs   = b.split("\U0001F5D3")               # split on the 🗓 calendar emoji
-        name   = segs[0].rstrip(" :").strip()
-        latest = ""
-        if len(segs) > 1:
-            first  = segs[1]
-            latest = (first.split(":", 1)[1] if ":" in first else first).strip()
-            latest = latest.lstrip("️").strip()  # drop a leading variation selector
-        tm = re.search(
-            r"([\U0001F7E2\U0001F534\U0001F680\U0001F53B➡]?\s*"
-            r"[+\-]?\d[\d.]*\s*%\s*QoQ,.*?YoY)",
-            segs[-1],
-        )
-        trend = tm.group(1).strip() if tm else ""
-        seg = name
-        if latest:
-            seg += f": {latest}"
-        if trend:
-            seg += f" · {trend}"
-        lines.append(seg)
-    return lines
-
-
-def _compact_metric_lines(caption: str, slots: int = 3) -> list:
-    """
-    Turn the Result Bits metrics into ONE COMPACT LINE PER METRIC, for the
-    dedicated results template (each template variable must be a single line, so
-    the 3-period breakdown can't survive there — the free-form text alert keeps
-    the full table). Handles BOTH the "📊 Key Metrics" table layout and the newer
-    inline 🤖 layout.
-
-        "Revenue from operations (REV): ₹72,275 Cr · 🟢 +2.03% QoQ, 🟢 +13.00% YoY"
-
-    Always returns exactly `slots` non-empty strings: unused slots become "—"
-    (Meta rejects an empty variable) and any metrics beyond `slots` are merged
-    into the last line.
-    """
-    m = re.search(r"📊 Key Metrics\s*(.+?)(?:\n\s*🤖|\n\s*You are receiving|$)",
+    m = re.search(r"\U0001F4CA Key Metrics\s*(.+?)(?:\n\s*\U0001F916|\n\s*You are receiving|$)",
                   caption or "", re.DOTALL)
-    lines = []
+    blocks = []
     if m:
         for chunk in re.split(r"\n\s*\n", m.group(1).strip()):
             rows = [r.strip() for r in chunk.split("\n") if r.strip()]
             if not rows:
                 continue
-            name, latest, trend = rows[0].rstrip(":"), "", ""
+            head, periods, trend = rows[0].rstrip(":").strip(), [], ""
             for r in rows[1:]:
-                if r.startswith("🗓️") and not latest:
-                    latest = r.split(":", 1)[1].strip() if ":" in r else ""
+                if r.startswith("\U0001F5D3"):                 # period row
+                    periods.append(r.lstrip("\U0001F5D3️ ").strip())
                 elif "QoQ" in r or "YoY" in r:
                     trend = r
-            seg = name
-            if latest:
-                seg += f": {latest}"
-            if trend:
-                seg += f" · {trend}"
-            lines.append(seg)
+            blocks.append(_metric_block(head, periods, trend))
 
-    # No structured table — fall back to splitting the inline 🤖 metrics run.
-    if not lines:
-        lines = _split_inline_metrics(caption)
+    # No structured table — the newer summaries pack the whole run of metrics
+    # INLINE on the 🤖 line as "<name> (ABBR): <latest> · <trend>".
+    # Only the LATEST period survives there; the rest come back empty.
+    if not blocks:
+        bm = re.search(r"🤖\s*(.+?)(?:\n\s*🔗|\n\s*📎|\n\s*You are receiving|$)",
+                       caption or "", re.DOTALL)
+        run = re.sub(r"\s+", " ", (bm.group(1) if bm else (caption or ""))).strip()
+        for chunk in re.findall(r"[A-Za-z][A-Za-z0-9 .\&()'-]*?\([A-Z]{2,}\):.*?YoY", run):
+            head, _, rest = chunk.partition(":")
+            tm = re.search(
+                r"[🟢🔴🚀🔻➡]?\s*[+\-]?\d[\d.]*\s*%\s*QoQ,.*?YoY",
+                rest,
+            )
+            trend = tm.group(0).strip() if tm else ""
+            value = (rest[:tm.start()] if tm else rest).strip().strip("·").strip()
+            blocks.append(_metric_block(head.strip(),
+                                        [value] if value else [],
+                                        trend))
+    return blocks
 
-    if not lines:
-        return ["—"] * slots
-    if len(lines) > slots:                       # merge the overflow into the last slot
-        lines = lines[:slots - 1] + ["  •  ".join(lines[slots - 1:])]
-    while len(lines) < slots:                    # pad — Meta rejects empty variables
-        lines.append("—")
-    return lines
+
+def _result_template_metrics(caption: str, periods_per_metric: int = 3) -> list:
+    """
+    Build the 12 metric variables of the results template: for each of the three
+    FIXED headings (REV / PAT / OPM), `periods_per_metric` period rows followed
+    by the change row. A metric the filing didn't report — or a period it didn't
+    break out — becomes "—", since Meta rejects an empty variable.
+
+        ["Jun 2026: ₹858.67 Cr", "Mar 2026: ₹857.77 Cr",
+         "Jun 2025: ₹622.50 Cr", "\U0001F7E2 0.10% QoQ, \U0001F680 37.94% YoY", ...]
+
+    Returns [] when NOTHING matched, so the caller can fall back to the Stock
+    Bits template instead of shipping a table made entirely of dashes.
+    """
+    blocks  = _parse_metric_blocks(caption)
+    used    = set()
+    params  = []
+    matched = False
+
+    for short, keywords in RESULT_TEMPLATE_SLOTS:
+        hit = None
+        for i, b in enumerate(blocks):
+            if i in used:
+                continue
+            name = b["name"].lower()
+            if b["short"] == short or any(k in name for k in keywords):
+                hit = b
+                used.add(i)
+                break
+        rows    = [p for p in (hit["periods"] if hit else []) if p][:periods_per_metric]
+        rows   += ["—"] * (periods_per_metric - len(rows))
+        matched = matched or bool(hit)
+        params.extend(rows + [(hit["trend"] if hit else "") or "—"])
+
+    return params if matched else []
 
 
 def _insert_filed_time(body: str, time_str: str) -> str:
@@ -802,8 +828,9 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
             # ── RESULTS → dedicated metrics-table template (if approved) ──────
             # A metrics table can't render in the Stock Bits template (one line
             # per variable). When TEMPLATE_RESULT_NAME is configured, results go
-            # to their own template with one metric per line. Until then they
-            # fall through to the Stock Bits template below (current behaviour).
+            # to their own template, which spells the table out as fixed text —
+            # 3 metrics × (3 period rows + a change row). Until then they fall
+            # through to the Stock Bits template below (current behaviour).
             result_tpl = getattr(config, "TEMPLATE_RESULT_NAME", "") or ""
             # Route to nse_result_bits whenever the topic/event line below the
             # company says "Results Out" — this catches BOTH the structured
@@ -822,30 +849,34 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
                 or ("💼" in (caption or "") and "📊" in (caption or ""))
             )
             if is_result and result_tpl:
-                slots   = int(getattr(config, "TEMPLATE_RESULT_METRIC_SLOTS", 3))
-                metrics = _compact_metric_lines(caption, slots)
-                # Flat results (no 📊 Key Metrics table) come back as empty "—"
-                # slots. Rather than ship a blank table, carry the 🤖 summary
-                # body in the first slot so the numbers still reach the user.
-                if body and all(m == "—" for m in metrics):
-                    metrics = [body] + ["—"] * (slots - 1)
-                params  = [
-                    title or "📢 *EquityAlerts Result Bits!!*",
-                    f"💼 {company} | {event}" if event else f"💼 {company}",
-                    f"🕒 Filed on exchange: {filed}" if filed else "🕒 Filed on exchange: n/a",
-                    *metrics,
-                    url or "https://equityalerts.in",
-                ]
-                wamid = whatsapp.send_text_template(phone, params,
-                                                    template_name=result_tpl)
-                bot_db.mark_batch_template_sent(phone)
-                bot_db.mark_filing_sent(phone, file_key)
-                bot_db.remove_pending_filing(phone, file_key)
-                if wamid:
-                    bot_db.store_wamid(wamid, phone, file_key, file_path, caption,
-                                       filing_id=filing_id, channel="template")
-                whatsapp._safe_print(f"[OK] Sent RESULT template to {phone} for {file_key}")
-                return True
+                # The template's fixed text carries the branded-free opener, the
+                # 3 metric headings, the calendar rows and the "Change:" labels;
+                # we supply only the VALUES. See config.TEMPLATE_RESULT_NAME for
+                # the approved body and why it is shaped this way.
+                periods = int(getattr(config, "TEMPLATE_RESULT_PERIOD_SLOTS", 3))
+                metrics = _result_template_metrics(caption, periods)
+                # No metrics matched REV/PAT/OPM (flat summary, or a filing that
+                # reports something else entirely) — the headings are fixed text,
+                # so a dash-filled table would be worse than the Stock Bits
+                # template's free-form summary. Fall through to it.
+                if metrics:
+                    cline = f"{company} | {event}" if event else company
+                    params = [
+                        cline or "Results Out",     # never empty — Meta rejects it
+                        filed or "n/a",
+                        *metrics,
+                        url or "https://equityalerts.in",
+                    ]
+                    wamid = whatsapp.send_text_template(phone, params,
+                                                        template_name=result_tpl)
+                    bot_db.mark_batch_template_sent(phone)
+                    bot_db.mark_filing_sent(phone, file_key)
+                    bot_db.remove_pending_filing(phone, file_key)
+                    if wamid:
+                        bot_db.store_wamid(wamid, phone, file_key, file_path, caption,
+                                           filing_id=filing_id, channel="template")
+                    whatsapp._safe_print(f"[OK] Sent RESULT template to {phone} for {file_key}")
+                    return True
 
             # The branded TITLE and the 🏢/⚡/🤖 emojis ride INSIDE the variable
             # values (not the approved template's fixed text) — so the template's

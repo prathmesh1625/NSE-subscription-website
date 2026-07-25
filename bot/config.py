@@ -123,36 +123,71 @@ TEMPLATE_BODY_PARAM_COUNT = 5         # {{1}}title {{2}}company {{3}}event+time 
 # ── Dedicated template for quarterly/annual RESULTS filings ──────────────
 # A metrics TABLE cannot render inside the Stock Bits template: every template
 # variable must be a single line, so all the metrics collapse into one blob.
-# A separate results template gives each metric its own line.
+# A separate results template gives each metric its own line — and, since this
+# rewrite, the full three-period breakdown (current qtr / prev qtr / year-ago)
+# under each metric, matching the free-form text alert.
 #
-# Body to create in WhatsApp Manager (category Utility, NO header):
+# APPROVED body in WhatsApp Manager (category Utility, NO header, NO footer):
 #
-#     {{1}}
+#     📊 Quarterly results filed for a company in your subscription.
 #
-#     {{2}}
+#     💼 {{1}}
 #
-#     {{3}}
+#     🕒 Filed on exchange: {{2}}
 #
-#     📊 Key Metrics
-#     {{4}}
-#     {{5}}
-#     {{6}}
+#     Key metrics
 #
-#     🔗 Download filing:
-#     {{7}}
+#     Revenue (REV):
+#     🗓️ {{3}}
+#     🗓️ {{4}}
+#     🗓️ {{5}}
+#     Change: {{6}}
+#
+#     Profit After Tax (PAT):
+#     🗓️ {{7}}
+#     🗓️ {{8}}
+#     🗓️ {{9}}
+#     Change: {{10}}
+#
+#     Operating Profit Margin (OPM):
+#     🗓️ {{11}}
+#     🗓️ {{12}}
+#     🗓️ {{13}}
+#     Change: {{14}}
+#
+#     Filing and details: {{15}}
 #
 #     You are receiving this stock update per your request on https://equityalerts.in/portal
 #     Disclaimer: https://equityalerts.in/portal/disclaimer
 #
-#   {{1}}=title ("📢 *PureFrame Result Bits!!*")   {{2}}="💼 <company> | <period> Results Out"
-#   {{3}}="🕒 Filed on exchange: <time>"           {{4}}..{{6}}=one metric per line
-#   {{7}}=download link.
-# Unused metric slots are filled with "—"; extra metrics are merged into the last.
+#   {{1}}="<company> | <period> Results Out"   {{2}}="<exchange time> IST"
+#   {{3}}..{{5}}   = REV periods, "Jun 2026: ₹858.67 Cr" (the 🗓️ is fixed text)
+#   {{6}}          = REV change,  "🟢 0.10% QoQ, 🚀 37.94% YoY"
+#   {{7}}..{{10}}  = the same four for PAT     {{11}}..{{14}} = the same for OPM
+#   {{15}}         = insights / download link.
+# Empty positions are filled with "—" (Meta rejects an empty variable).
+#
+# WHY THE LAYOUT LOOKS LIKE THIS — two Meta constraints fought each other:
+#   • "Too many variables for its length" — the ratio of variables to FIXED text
+#     is checked, so the metric NAMES, the 🗓️/Change: labels and the opening
+#     line all live in the fixed text. That is also why db_watcher has to map
+#     whatever the extractor found onto exactly REV / PAT / OPM.
+#   • Category = Marketing — Meta classifies on the fixed text ONLY, so the
+#     branded "📢 *EquityAlerts Result Bits!!*" title and "🤖 Key Insights"
+#     wording had to come OUT of it (an earlier draft carried the title as a
+#     variable, but the body may not START with one). The branded header still
+#     rides on the free-form text alert inside the 24h window; closed-window
+#     template sends go out with the neutral opener above. Do NOT put the brand
+#     name or "!!" back into the fixed text — it flips to Marketing.
 #
 # Defaults to the APPROVED "nse_result_bits" template so results use the
 # metrics-table layout. Set to "" (via env) to fall back to TEMPLATE_NAME.
 TEMPLATE_RESULT_NAME         = os.environ.get("TEMPLATE_RESULT_NAME", "nse_result_bits")
-TEMPLATE_RESULT_METRIC_SLOTS = int(os.environ.get("TEMPLATE_RESULT_METRIC_SLOTS", 3))
+# Period rows per metric in the template above. Changing this needs a NEW
+# approved template — the 🗓️ rows are fixed text, not something we can vary.
+TEMPLATE_RESULT_PERIOD_SLOTS = int(os.environ.get("TEMPLATE_RESULT_PERIOD_SLOTS", 3))
+# {{1}}company {{2}}filed {{3}}..{{14}} 3 metrics × (3 periods + change) {{15}}link
+TEMPLATE_RESULT_PARAM_COUNT  = 15
 # The old "Full Summary" quick-reply button has been retired — nobody tapped it,
 # and the summary now arrives inline in the template body instead. Keep this
 # False. (To remove the button visually too, delete it from the approved
