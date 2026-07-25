@@ -59,7 +59,8 @@ async function searchUsers(search, page, pageSize) {
             u.created_at,
             s.status       AS sub_status,
             s.end_date     AS sub_end_date,
-            p.name         AS plan_name
+            p.name         AS plan_name,
+            (SELECT COUNT(*) FROM user_companies uc WHERE uc.user_id = u.id) AS companies_count
         FROM users u
         LEFT JOIN subscriptions s
             ON s.user_id = u.id AND s.status = 'ACTIVE'

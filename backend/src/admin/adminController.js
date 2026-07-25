@@ -358,6 +358,19 @@ async function listUsers(req, res) {
                     primary: u.mobile,
                     secondary: u.name || "(no name on file)",
                     tags,
+                    // Total shares/companies this user tracks, shown as its
+                    // own directory column so an admin can see it without
+                    // opening the user (e.g. "60").
+                    companiesCount: Number(u.companies_count),
+                    // Extra directory columns the dashboard's table already
+                    // renders (Plan / Plan status / Plan end date / Joined
+                    // on) — the query already selects all of this, it just
+                    // wasn't being mapped into the response before, so those
+                    // columns always rendered blank.
+                    planName: u.plan_name || null,
+                    subStatus: u.sub_status || null,
+                    planEndDate: u.sub_end_date || null,
+                    joinedOn: u.created_at,
                 };
             }),
         });
