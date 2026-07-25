@@ -344,7 +344,11 @@ def _format_exchange_time(raw) -> str:
 #   1 = legacy Stock-Bits-only layout
 #   2 = Stock Bits + structured Result Bits (metrics table)
 #   3 = EquityAlerts branding (was PureFrame), PureFrame Labs ad footer removed
-SUMMARY_FORMAT_VERSION = 3
+#   4 = unit reconciliation + plausibility guards (output.py). Bumped because
+#       the CONTENT changed, not the layout: summaries cached at v3 hold
+#       mislabelled figures (a lakhs table transcribed as "Cr" overstates 100x)
+#       and would otherwise be re-sent verbatim, never seeing the new guards.
+SUMMARY_FORMAT_VERSION = 4
 
 
 
@@ -423,7 +427,8 @@ def _parse_metric_blocks(caption: str) -> list:
     return blocks
 
 
-def _result_template_metrics(caption: str, periods_per_metric: int = 3) -> list:
+def _result_template_metrics(caption: str, periods_per_metric: int = 3,
+                             require_all: bool = False) -> list:
     """
     Build the 12 metric variables of the results template: for each of the three
     FIXED headings (REV / PAT / OPM), `periods_per_metric` period rows followed
@@ -433,13 +438,19 @@ def _result_template_metrics(caption: str, periods_per_metric: int = 3) -> list:
         ["Jun 2026: ₹858.67 Cr", "Mar 2026: ₹857.77 Cr",
          "Jun 2025: ₹622.50 Cr", "\U0001F7E2 0.10% QoQ, \U0001F680 37.94% YoY", ...]
 
-    Returns [] when NOTHING matched, so the caller can fall back to the Stock
-    Bits template instead of shipping a table made entirely of dashes.
+    Returns [] when REVENUE is missing — or, with require_all=True, unless ALL
+    THREE headings were filled. Pass require_all when sending to the
+    fixed-heading template: its "Profit After Tax (PAT):" / "Operating Profit
+    Margin (OPM):" lines are fixed text that render whether or not we have
+    those metrics, so a partial fill puts dash rows in front of subscribers.
+    The caller then drops to the free-form Stock Bits summary, which shows
+    only what the filing actually reported.
     """
-    blocks  = _parse_metric_blocks(caption)
-    used    = set()
-    params  = []
-    matched = False
+    blocks     = _parse_metric_blocks(caption)
+    used       = set()
+    params     = []
+    rev_filled = False
+    filled     = 0
 
     for short, keywords in RESULT_TEMPLATE_SLOTS:
         hit = None
@@ -451,12 +462,64 @@ def _result_template_metrics(caption: str, periods_per_metric: int = 3) -> list:
                 hit = b
                 used.add(i)
                 break
-        rows    = [p for p in (hit["periods"] if hit else []) if p][:periods_per_metric]
-        rows   += ["—"] * (periods_per_metric - len(rows))
-        matched = matched or bool(hit)
+        rows  = [p for p in (hit["periods"] if hit else []) if p][:periods_per_metric]
+        if rows:
+            filled += 1
+            if short == "REV":
+                rev_filled = True
+        rows += ["—"] * (periods_per_metric - len(rows))
         params.extend(rows + [(hit["trend"] if hit else "") or "—"])
 
-    return params if matched else []
+    if require_all:
+        return params if filled == len(RESULT_TEMPLATE_SLOTS) else []
+    return params if rev_filled else []
+
+
+# Which metrics get the (limited) template blocks when a filing reports more
+# than fit. Ordered by what a subscriber cares about most; anything not listed
+# keeps its position after these, in the order the filing reported it.
+RESULT_METRIC_PRIORITY = ("REV", "PAT", "OPM", "EBITDA", "EPS")
+
+
+def _result_metric_blocks(caption: str, periods_per_metric: int = 3,
+                          max_blocks: int = 3) -> list:
+    """
+    The metrics a filing ACTUALLY reported, as up to `max_blocks` render-ready
+    blocks for the variable-heading result templates:
+
+        {"heading": "Revenue (REV):",
+         "rows":    ["Jun 2026: ₹5,972 Cr", "Mar 2026: ₹5,677 Cr", …],
+         "change":  "🟢 +5.20% QoQ, 🚀 +21.10% YoY"}
+
+    Unlike _result_template_metrics (which fills three FIXED headings and pads
+    the rest with "—"), this returns only what exists — the caller then routes
+    to the approved template with that many blocks, so a filing reporting one
+    metric renders one block instead of two rows of dashes. It also means
+    metrics outside REV/PAT/OPM (EBITDA, EPS …) can be shown rather than
+    dropped, since the heading travels as a variable.
+
+    Period rows are still padded to `periods_per_metric` with "—": a filing
+    that breaks out fewer periods is rare, and per-period template variants
+    would mean nine approved templates instead of three.
+    """
+    ordered = []
+    for b in _parse_metric_blocks(caption):
+        rows = [p for p in b["periods"] if p]
+        if not rows:
+            continue                       # nothing to show for this metric
+        try:
+            rank = RESULT_METRIC_PRIORITY.index(b["short"])
+        except ValueError:
+            rank = len(RESULT_METRIC_PRIORITY)
+        ordered.append((rank, len(ordered), b, rows))
+
+    blocks = []
+    for _, _, b, rows in sorted(ordered, key=lambda t: (t[0], t[1]))[:max_blocks]:
+        rows = rows[:periods_per_metric]
+        rows += ["—"] * (periods_per_metric - len(rows))
+        heading = f"{b['name']} ({b['short']}):" if b["short"] else f"{b['name']}:"
+        blocks.append({"heading": heading, "rows": rows, "change": b["trend"] or "—"})
+    return blocks
 
 
 def _insert_filed_time(body: str, time_str: str) -> str:
@@ -651,6 +714,44 @@ def _split_download_link(caption: str):
     return caption, url
 
 
+def _is_result_caption(caption: str) -> bool:
+    """
+    True when `caption` is a financial-RESULTS alert (Result Bits), as opposed
+    to a routine filing (board meeting notice, Reg 30 disclosure, …).
+
+    The generator brands a message "… Result Bits!!" ONLY when it actually
+    detected a financial-results filing (everything else is "… Stock Bits!!"),
+    so the title is the reliable signal. The "<period> Results Out" event line
+    is not — it varies ("Jun 2026 Results Out", "Results Out", or a heading
+    with no "Out" at all) — so it's only a fallback signal alongside it.
+    """
+    title_line = re.search(r"📢[^\n]*", caption or "")
+    return (
+        (bool(title_line) and "result bits" in title_line.group(0).lower())
+        or bool(re.search(r"results?\s+out", caption or "", re.IGNORECASE))
+        or ("💼" in (caption or "") and "📊" in (caption or ""))
+    )
+
+
+def _result_period_key(caption: str) -> str:
+    """
+    Normalised "reporting period" for a Result Bits caption, e.g. "jun 2026"
+    from "💼 <company> | Jun 2026 Results Out". Used to dedup — NSE/BSE often
+    publish several PDFs for the same result (standalone + consolidated +
+    investor presentation, …), each becoming its own filing row upstream. Each
+    is independently summarised, and the AI extraction is inconsistent enough
+    across documents that a subscriber must not get 3 conflicting alerts for
+    one quarter. Returns "" when no period can be parsed — callers then skip
+    period-based dedup entirely rather than dedup on an empty/shared key.
+    """
+    m = re.search(r"💼[^\n|]*\|\s*(.+)", caption or "")
+    event = m.group(1).strip() if m else ""
+    if not event:
+        return ""
+    period = re.sub(r"\s*results?\s+out\s*$", "", event, flags=re.IGNORECASE).strip()
+    return period.lower()
+
+
 def _parse_stock_bits_parts(caption: str):
     """
     Split an assembled caption into its dynamic pieces for the SPACED template:
@@ -827,48 +928,82 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
 
             # ── RESULTS → dedicated metrics-table template (if approved) ──────
             # A metrics table can't render in the Stock Bits template (one line
-            # per variable). When TEMPLATE_RESULT_NAME is configured, results go
-            # to their own template, which spells the table out as fixed text —
-            # 3 metrics × (3 period rows + a change row). Until then they fall
-            # through to the Stock Bits template below (current behaviour).
-            result_tpl = getattr(config, "TEMPLATE_RESULT_NAME", "") or ""
-            # Route to nse_result_bits whenever the topic/event line below the
-            # company says "Results Out" — this catches BOTH the structured
+            # per variable), so results go to their own template: a metric per
+            # block, 3 period rows + a change row each. Preferred route is the
+            # template matching the NUMBER of metrics the filing reported (see
+            # config.TEMPLATE_RESULT_NAME_1/2/3); the fixed-heading
+            # TEMPLATE_RESULT_NAME is the fallback until those are approved.
+            # Route to a results template whenever the topic/event line below
+            # the company says "Results Out" — this catches BOTH the structured
             # Result Bits layout (💼 … | … Results Out / 📊 metrics) AND a flat
             # Stock Bits summary of a results filing (⚡ … Results Out). Anything
             # else stays on the earlier Stock Bits template (TEMPLATE_NAME).
-            # The generator brands a message "… Result Bits!!" ONLY when it
-            # actually detected a financial-results filing (everything else is
-            # "… Stock Bits!!"), so the title is the reliable signal. The
-            # "<period> Results Out" event line is not — it varies ("Jun 2026
-            # Results Out", "Results Out", or a heading with no "Out" at all).
-            title_line = re.search(r"📢[^\n]*", caption or "")
-            is_result = (
-                (bool(title_line) and "result bits" in title_line.group(0).lower())
-                or bool(re.search(r"results?\s+out", caption or "", re.IGNORECASE))
-                or ("💼" in (caption or "") and "📊" in (caption or ""))
-            )
-            if is_result and result_tpl:
-                # The template's fixed text carries the branded-free opener, the
-                # 3 metric headings, the calendar rows and the "Change:" labels;
-                # we supply only the VALUES. See config.TEMPLATE_RESULT_NAME for
-                # the approved body and why it is shaped this way.
+            is_result = _is_result_caption(caption)
+            if is_result:
                 periods = int(getattr(config, "TEMPLATE_RESULT_PERIOD_SLOTS", 3))
-                metrics = _result_template_metrics(caption, periods)
-                # No metrics matched REV/PAT/OPM (flat summary, or a filing that
-                # reports something else entirely) — the headings are fixed text,
-                # so a dash-filled table would be worse than the Stock Bits
-                # template's free-form summary. Fall through to it.
-                if metrics:
-                    cline = f"{company} | {event}" if event else company
-                    params = [
-                        cline or "Results Out",     # never empty — Meta rejects it
-                        filed or "n/a",
-                        *metrics,
-                        url or "https://equityalerts.in",
-                    ]
+                cline   = (f"{company} | {event}" if event else company) or "Results Out"
+                sent    = False
+
+                # ── Preferred: a template sized to the metrics we actually have.
+                # A template renders every fixed line unconditionally, so a
+                # 1-metric filing in the 3-metric template shows two headings
+                # over rows of "—". Picking the template by block count is what
+                # keeps those off subscribers' screens.
+                #
+                # Degrades DOWNWARD: with only the 1- and 2-metric templates
+                # approved, a 3-metric filing sends its top 2 metrics rather
+                # than falling back to a layout that would show dashes. Better
+                # to omit a metric than to render an empty one.
+                blocks    = _result_metric_blocks(caption, periods, max_blocks=3)
+                result_tpl = getattr(config, "TEMPLATE_RESULT_NAME", "") or ""
+                # The legacy fixed-heading template covers the 3 × REV/PAT/OPM
+                # case correctly, so try it BEFORE degrading — degrading first
+                # would drop OPM from a filing that reported all three.
+                legacy_ok = bool(
+                    result_tpl and len(blocks) == 3
+                    and _result_template_metrics(caption, periods, require_all=True)
+                )
+                count_tpl = ""
+                if blocks and hasattr(config, "result_template_for"):
+                    count_tpl = config.result_template_for(len(blocks))
+                    if not count_tpl and not legacy_ok:
+                        for n in range(len(blocks) - 1, 0, -1):
+                            count_tpl = config.result_template_for(n)
+                            if count_tpl:
+                                blocks = blocks[:n]
+                                break
+                if count_tpl:
+                    params = [cline, filed or "n/a"]
+                    for b in blocks:
+                        params.append(b["heading"])
+                        params.extend(b["rows"])
+                        params.append(b["change"])
+                    params.append(url or "https://equityalerts.in")
                     wamid = whatsapp.send_text_template(phone, params,
-                                                        template_name=result_tpl)
+                                                        template_name=count_tpl)
+                    sent = True
+
+                # ── Fallback: the fixed-heading REV/PAT/OPM template, for as
+                # long as the per-count templates aren't approved yet. Its
+                # headings are FIXED TEXT, so it's only correct when the filing
+                # reported exactly those three — require_all=True makes it
+                # return [] otherwise, dropping us to the Stock Bits summary
+                # rather than sending a table with dash rows.
+                if not sent:
+                    metrics = (_result_template_metrics(caption, periods, require_all=True)
+                               if result_tpl else [])
+                    if metrics:
+                        params = [
+                            cline,
+                            filed or "n/a",
+                            *metrics,
+                            url or "https://equityalerts.in",
+                        ]
+                        wamid = whatsapp.send_text_template(phone, params,
+                                                            template_name=result_tpl)
+                        sent = True
+
+                if sent:
                     bot_db.mark_batch_template_sent(phone)
                     bot_db.mark_filing_sent(phone, file_key)
                     bot_db.remove_pending_filing(phone, file_key)
@@ -1127,14 +1262,30 @@ def process_new_filings():
         age = j.get("age_seconds")
         age_note = f" [saved {age}s ago by scraper]" if age is not None else ""
         print(f"📤 Sending {j['symbol']} '{j['filing_type']}' to {len(j['subscribers'])} subscriber(s)...{age_note}")
+
+        # NSE/BSE often file several PDFs for one results event (standalone +
+        # consolidated + investor presentation, corrigenda, ...), each a
+        # separate row upstream. Each is summarised independently and the AI
+        # extraction is inconsistent enough across documents that subscribers
+        # must not get one alert per PDF — cap it to one per symbol+period.
+        # period_key == "" for non-results filings, which skips this entirely.
+        period_key = _result_period_key(caption) if _is_result_caption(caption) else ""
+
         all_sent = True
         for phone in j["subscribers"]:
             if bot_db.is_filing_sent(phone, j["file_key"]):
                 print(f"ℹ️  Already sent filing {j['file_key']} to {phone}, skipping.")
                 continue
+            if period_key and bot_db.is_result_period_sent(phone, j["symbol"], period_key):
+                print(f"ℹ️  Already sent {j['symbol']} results for '{period_key}' to {phone} "
+                      f"(different filing PDF) — skipping duplicate.")
+                bot_db.mark_filing_sent(phone, j["file_key"])
+                continue
             # Only marks sent on confirmed success; queues on failure.
             ok = _try_send(phone, j["file_path"], caption, j["file_key"],
                            filing_id=j["filing_id"], template_params=[j["company"]])
+            if ok and period_key:
+                bot_db.mark_result_period_sent(phone, j["symbol"], period_key)
             if not ok:
                 all_sent = False
 
@@ -1221,9 +1372,20 @@ def deliver_backfill_for_subscribers():
                                             file_path, row['announcement_time'],
                                             row.get("pdf_url") or "")
 
+                    # Same symbol+period dedup as process_new_filings — the
+                    # backfill window can contain several PDFs for one results
+                    # event too, and a brand-new subscriber shouldn't get one
+                    # alert per PDF for their first quarter either.
+                    period_key = _result_period_key(caption) if _is_result_caption(caption) else ""
+                    if period_key and bot_db.is_result_period_sent(phone, symbol, period_key):
+                        bot_db.mark_filing_sent(phone, file_key)
+                        continue
+
                     # Only marks sent on confirmed success; queues on failure.
                     if _try_send(phone, file_path, caption, file_key,
                                  filing_id=row["id"], template_params=[name]):
+                        if period_key:
+                            bot_db.mark_result_period_sent(phone, symbol, period_key)
                         print(f"✅ Auto-delivered {file_key} to {phone}")
 
         pg_cur.close()

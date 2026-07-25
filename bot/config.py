@@ -188,6 +188,82 @@ TEMPLATE_RESULT_NAME         = os.environ.get("TEMPLATE_RESULT_NAME", "nse_resul
 TEMPLATE_RESULT_PERIOD_SLOTS = int(os.environ.get("TEMPLATE_RESULT_PERIOD_SLOTS", 3))
 # {{1}}company {{2}}filed {{3}}..{{14}} 3 metrics × (3 periods + change) {{15}}link
 TEMPLATE_RESULT_PARAM_COUNT  = 15
+
+# ── Per-metric-COUNT result templates (variable headings) ────────────────
+# A WhatsApp template has no conditionals: every fixed line renders on every
+# send. The template above hard-codes three headings, so a filing reporting
+# only revenue still shows "Profit After Tax (PAT):" over three "—" rows,
+# which looks broken to subscribers. The only fix is one approved template per
+# block count, selected at send time.
+#
+# These also carry the metric HEADING as a variable, which the 3-block
+# template above cannot afford (it spends its variable budget on the fixed
+# headings). That means a filing reporting EBITDA or EPS shows them under
+# their own name instead of being dropped for not being REV/PAT/OPM.
+#
+# Bodies to create in WhatsApp Manager — category Utility, NO header, NO
+# footer. ONE-METRIC body (8 variables):
+#
+#     📊 Quarterly results filed for a company in your subscription.
+#
+#     💼 {{1}}
+#
+#     🕒 Filed on exchange: {{2}}
+#
+#     Key metrics
+#
+#     {{3}}
+#     🗓️ {{4}}
+#     🗓️ {{5}}
+#     🗓️ {{6}}
+#     Change: {{7}}
+#
+#     Figures as reported by the company in its exchange filing.
+#
+#     Filing and details: {{8}}
+#
+#     You are receiving this stock update per your request on https://equityalerts.in/portal
+#     Disclaimer: https://equityalerts.in/portal/disclaimer
+#
+# TWO-METRIC body (13 variables): same, with a second block
+#
+#     {{8}}
+#     🗓️ {{9}}
+#     🗓️ {{10}}
+#     🗓️ {{11}}
+#     Change: {{12}}
+#
+# inserted after the first, and the link becoming {{13}}.
+#
+# THREE-METRIC body (18 variables): a third block, link = {{18}}.
+#
+#   {{1}}="<company> | <period> Results Out"   {{2}}="<exchange time> IST"
+#   then per block: heading ("Revenue (REV):"), 3 period rows, change row.
+#   Last variable is always the insights/download link.
+#
+# The "Figures as reported…" line is not decoration — Meta rejects a body with
+# too many variables for its fixed-text length, and the 3-block one is close to
+# that limit. If the 18-variable body is rejected anyway, leave
+# TEMPLATE_RESULT_NAME_3 empty: 3-metric results then keep using the approved
+# fixed-heading TEMPLATE_RESULT_NAME above (correct, since a 3-metric filing is
+# almost always exactly REV/PAT/OPM), and only 1- and 2-metric results use the
+# new layouts.
+#
+# Leave a name EMPTY until that template is APPROVED — the code falls back to
+# the old behaviour for that count, so deploying this early is safe.
+TEMPLATE_RESULT_NAME_1 = os.environ.get("TEMPLATE_RESULT_NAME_1", "")
+TEMPLATE_RESULT_NAME_2 = os.environ.get("TEMPLATE_RESULT_NAME_2", "")
+TEMPLATE_RESULT_NAME_3 = os.environ.get("TEMPLATE_RESULT_NAME_3", "")
+
+
+def result_template_for(block_count: int) -> str:
+    """The approved template name for a results alert with `block_count`
+    metric blocks, or "" when none is configured for that count."""
+    return {
+        1: TEMPLATE_RESULT_NAME_1,
+        2: TEMPLATE_RESULT_NAME_2,
+        3: TEMPLATE_RESULT_NAME_3,
+    }.get(block_count, "") or ""
 # The old "Full Summary" quick-reply button has been retired — nobody tapped it,
 # and the summary now arrives inline in the template body instead. Keep this
 # False. (To remove the button visually too, delete it from the approved

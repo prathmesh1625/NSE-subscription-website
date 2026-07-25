@@ -148,9 +148,22 @@ Your task:
    - QoQ = ((current - prev_quarter) / |prev_quarter|) * 100
    - YoY = ((current - same_qtr_last_year) / |same_qtr_last_year|) * 100
    - Round to 2 decimal places, include sign (+/-)
-5. For margins (OPM, EBITDA%), unit = "percent"; for monetary values unit = "crore"
-   (or million/billion as per document).
-6. Format monetary values with Rs symbol and Cr/Mn suffix as shown in the document.
+5. UNITS — READ THE TABLE HEADING BEFORE COPYING ANY NUMBER.
+   Indian results tables state their denomination in a heading such as
+   "(₹ in lakhs)", "(Rs. in Crore)", "(₹ in Millions)". You MUST use the
+   denomination that the table you copied from actually states:
+     - table says lakhs   → unit = "lakh"    and suffix the value "Lakh"
+     - table says crore   → unit = "crore"   and suffix the value "Cr"
+     - table says million → unit = "million" and suffix the value "Mn"
+     - table says billion → unit = "billion" and suffix the value "Bn"
+   Do NOT relabel a lakhs figure as crore. A value of 1,07,496 in a table
+   headed "(₹ in lakhs)" is ₹1,07,496 Lakh (= ₹1,074.96 Cr) — writing it as
+   "₹1,07,496 Cr" overstates it 100x and is a serious error.
+   Do NOT convert between denominations yourself — copy the number exactly as
+   printed and label it with the table's own denomination.
+   For margins (OPM, EBITDA%), unit = "percent".
+6. Format monetary values with the Rs symbol and the denomination suffix from
+   rule 5, matching what the source table states.
 7. Format percentage values with % suffix.
 
 CRITICAL ANTI-HALLUCINATION RULES (read carefully):
@@ -563,6 +576,193 @@ def verify_metrics_against_text(summary: "FinancialSummary", pdf_text: str) -> i
     return len(kept)
 
 
+_VALUE_NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+
+# Multiply a figure in <scale> by this to get crore.
+_SCALE_TO_CRORE = {"lakh": 0.01, "crore": 1.0, "million": 0.1, "billion": 100.0}
+
+# The denomination heading Indian results tables carry: "(₹ in lakhs)",
+# "(Rs. in Crore)", "(₹ in Millions)", "Amount in Lakhs", ... We deliberately
+# require the "in <unit>" phrasing — a bare "Cr" appears all over a document as
+# a value suffix and would make detection meaningless.
+_DOC_SCALE_RE = re.compile(
+    r"(?:rs\.?|inr|₹|amount|figures)?\s*(?:are\s+)?in\s+"
+    r"(lakhs?|lacs?|crores?|millions?|billions?)\b",
+    re.IGNORECASE,
+)
+_SCALE_ALIASES = {
+    "lakh": "lakh", "lakhs": "lakh", "lac": "lakh", "lacs": "lakh",
+    "crore": "crore", "crores": "crore",
+    "million": "million", "millions": "million",
+    "billion": "billion", "billions": "billion",
+}
+
+
+def detect_document_scale(pdf_text: str) -> str | None:
+    """
+    The denomination the source table is printed in ("lakh" / "crore" /
+    "million" / "billion"), read from its own heading — or None when the
+    document never states one.
+
+    This is the ground truth for reconcile_metric_units(). Models routinely
+    copy a figure verbatim off a lakhs-denominated table and then label it
+    "Cr" (a silent 100x overstatement) — a bank PAT of ₹1,07,496 lakh was
+    shipped as "₹1,07,496 Cr" in production. The document's own heading is a
+    far more reliable signal than anything the model reports about units.
+    """
+    if not pdf_text:
+        return None
+    counts = {}
+    for m in _DOC_SCALE_RE.finditer(pdf_text):
+        scale = _SCALE_ALIASES.get(m.group(1).lower())
+        if scale:
+            counts[scale] = counts.get(scale, 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _stated_scale(value: str, unit: str) -> str | None:
+    """The denomination a metric VALUE claims, from its own suffix first
+    ("₹1,075 Cr" → crore), falling back to the block's declared `unit`."""
+    low = (value or "").lower()
+    if re.search(r"\blakhs?\b|\blacs?\b", low):
+        return "lakh"
+    if re.search(r"\bmn\b|\bmillions?\b", low):
+        return "million"
+    if re.search(r"\bbn\b|\bbillions?\b", low):
+        return "billion"
+    if re.search(r"\bcr\b|\bcrores?\b", low):
+        return "crore"
+    return _SCALE_ALIASES.get((unit or "").lower())
+
+
+def _format_crore(v: float) -> str:
+    """Render a crore figure the way the rest of the message does."""
+    return f"₹{v:,.2f} Cr" if abs(v) < 1000 else f"₹{v:,.0f} Cr"
+
+
+def reconcile_metric_units(summary: "FinancialSummary", pdf_text: str,
+                           doc_scale: str | None) -> int:
+    """
+    Re-label (and convert to crore) any metric value that was copied VERBATIM
+    off the source table but tagged with the wrong denomination.
+
+    The verbatim check is what makes this safe: if the digits the model emitted
+    appear as-is in the PDF, it transcribed the printed figure rather than
+    converting it — so the figure's true denomination MUST be the table's
+    (`doc_scale`), whatever the model labelled it. When the digits do NOT
+    appear verbatim the model did its own conversion, and we leave it alone
+    rather than risk double-converting a correct value.
+
+    Returns the number of period values corrected.
+    """
+    if not doc_scale or doc_scale not in _SCALE_TO_CRORE:
+        return 0
+    text_digits = re.sub(r"[,\s]", "", pdf_text or "")
+    fixed = 0
+    for m in summary.metrics:
+        touched = False
+        for p in m.periods:
+            if not p.value or "%" in p.value:
+                continue
+            num = _VALUE_NUM_RE.search(p.value)
+            if not num:
+                continue
+            core = num.group(0).replace(",", "").rstrip(".")
+            # Only trust figures transcribed straight from the document.
+            if not core or core not in text_digits:
+                continue
+            if _stated_scale(p.value, m.unit) == doc_scale:
+                continue                      # already labelled correctly
+            p.value = _format_crore(float(core) * _SCALE_TO_CRORE[doc_scale])
+            touched = True
+            fixed += 1
+        if touched:
+            m.unit = "crore"
+    return fixed
+
+
+# Absolute plausibility cap for a QUARTERLY figure of a single Indian listed
+# company, expressed in crore. ₹5,00,000 Cr (~$60B) comfortably covers even
+# Reliance/TCS-scale quarters, so genuine numbers never approach it. Guards
+# against the extraction picking up a BALANCE-SHEET total (assets, deposits,
+# advances) instead of a P&L line — observed in production as a bank's
+# "Revenue" metric coming back at ₹13,36,052 Cr, ~2.5x India's entire
+# quarterly GDP.
+_MAX_PLAUSIBLE_CRORE   = 500_000
+# Percent-denominated metrics (margins, ratios) shouldn't realistically exceed this.
+_MAX_PLAUSIBLE_PERCENT = 1000
+
+
+def _value_to_crore(value: str, unit: str) -> float | None:
+    """
+    Best-effort magnitude of a metric period VALUE, normalised to crore.
+    Sniffs the unit from the value string itself first ("Rs. 858.67 Cr",
+    "$12.3 Mn") since the model's declared per-metric `unit` field is not
+    always consistent with what it actually wrote. Returns None when no
+    number/currency unit can be parsed — callers should then SKIP the
+    plausibility check rather than risk a false-positive drop.
+    """
+    if not value or "%" in value:
+        return None
+    m = _VALUE_NUM_RE.search(value)
+    if not m:
+        return None
+    num = float(m.group(0).replace(",", ""))
+    low = value.lower()
+    if "lakh" in low:
+        return num / 100
+    if re.search(r"\bmn\b|million", low):
+        return num / 10
+    if re.search(r"\bbn\b|billion", low):
+        return num * 100
+    if "cr" in low:
+        return num
+    # No unit token in the value text itself — fall back to the block's
+    # declared unit field.
+    unit = (unit or "").lower()
+    if unit == "lakh":
+        return num / 100
+    if unit == "million":
+        return num / 10
+    if unit == "billion":
+        return num * 100
+    if unit == "crore":
+        return num
+    return None
+
+
+def drop_implausible_metrics(summary: "FinancialSummary") -> int:
+    """
+    Drop any metric with a period value whose magnitude is implausible for a
+    single quarter (see _MAX_PLAUSIBLE_CRORE/_PERCENT above).
+
+    Complements verify_metrics_against_text: that guard only checks the
+    digits appear SOMEWHERE in the source PDF, which a balance-sheet total
+    passes just as easily as the correct P&L figure — this catches those by
+    scale instead of provenance. Returns the number of metrics kept.
+    """
+    kept = []
+    for m in summary.metrics:
+        implausible = False
+        for p in m.periods:
+            if "%" in (p.value or ""):
+                num = _VALUE_NUM_RE.search(p.value)
+                if num and abs(float(num.group(0).replace(",", ""))) > _MAX_PLAUSIBLE_PERCENT:
+                    implausible = True
+                    break
+                continue
+            crore = _value_to_crore(p.value, m.unit)
+            if crore is not None and abs(crore) > _MAX_PLAUSIBLE_CRORE:
+                implausible = True
+                break
+        if not implausible:
+            kept.append(m)
+    summary.metrics = kept
+    return len(kept)
+
+
 def process_pdf(
     pdf_source: str,
     provider: str = "google",
@@ -615,9 +815,26 @@ def process_pdf(
             # Prefer the extracted name; fall back to the caller's known company.
             company = summary.company_name or company_hint or "Unknown Company"
             summary.company_name = company
-            # Defence in depth: drop any metric whose numbers aren't in the PDF.
+            # Defence in depth, in THIS order — each step depends on the last:
+            #  1. verify: drop metrics whose digits aren't in the PDF at all.
+            #     Must run BEFORE reconciliation, which rewrites values into
+            #     crore and would then no longer match the source text.
             verified = verify_metrics_against_text(summary, pdf_text)
             print(f"      Kept {verified} metric(s) verified against source text.", file=sys.stderr)
+            #  2. reconcile: fix figures transcribed off a lakhs/millions table
+            #     but labelled "Cr" (the 100x error class).
+            doc_scale = detect_document_scale(pdf_text)
+            if doc_scale:
+                corrected = reconcile_metric_units(summary, pdf_text, doc_scale)
+                if corrected:
+                    print(f"      Document is denominated in {doc_scale} — "
+                          f"re-scaled {corrected} mislabelled value(s) to Cr.", file=sys.stderr)
+            #  3. plausibility: drop what's still absurd for a quarterly figure
+            #     (e.g. a balance-sheet total misread as Revenue/PAT).
+            plausible = drop_implausible_metrics(summary)
+            if plausible != verified:
+                print(f"      Dropped {verified - plausible} metric(s) with "
+                      f"implausible magnitude.", file=sys.stderr)
         except Exception as e:
             print(f"      Financial extraction failed ({e}) — will use content summary.", file=sys.stderr)
     else:

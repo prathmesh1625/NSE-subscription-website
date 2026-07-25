@@ -186,6 +186,23 @@ def init_db():
             )
         """)
 
+        # NSE/BSE often publish several PDFs for one results event (standalone
+        # + consolidated + investor presentation, corrigenda, ...) as separate
+        # filing rows upstream. Each is summarised independently, and the AI
+        # extraction is inconsistent enough across documents that a subscriber
+        # must not get one Result Bits alert per PDF. This tracks the first
+        # symbol+period alert actually delivered per phone so later filings for
+        # the SAME quarter are suppressed regardless of which PDF produced them.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sent_result_periods (
+                phone   TEXT,
+                symbol  TEXT,
+                period  TEXT,
+                sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (phone, symbol, period)
+            )
+        """)
+
         conn.commit()
         conn.close()
     print("✅ Bot SQLite database ready.")
@@ -447,6 +464,37 @@ def mark_filing_sent(phone: str, filing_id: str):
         conn.execute(
             "INSERT OR IGNORE INTO sent_filings (phone, filing_id) VALUES (?, ?)",
             (phone, str(filing_id))
+        )
+        conn.commit()
+        conn.close()
+
+
+# ── Sent RESULT periods tracker (symbol+quarter, not per-PDF) ──
+
+def is_result_period_sent(phone: str, symbol: str, period: str) -> bool:
+    """True if this phone already received a Result Bits alert for this
+    symbol+reporting-period (from ANY of the possibly-several filing PDFs)."""
+    if not period:
+        return False
+    with _lock:
+        conn = get_conn()
+        row  = conn.execute(
+            "SELECT 1 FROM sent_result_periods WHERE phone=? AND symbol=? AND period=?",
+            (phone, symbol, period)
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+
+def mark_result_period_sent(phone: str, symbol: str, period: str):
+    """Record that this phone received the results alert for symbol+period."""
+    if not period:
+        return
+    with _lock:
+        conn = get_conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO sent_result_periods (phone, symbol, period) VALUES (?, ?, ?)",
+            (phone, symbol, period)
         )
         conn.commit()
         conn.close()
