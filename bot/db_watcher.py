@@ -374,7 +374,19 @@ def _format_exchange_time(raw) -> str:
 #       the exchange's own record for the filing. A v6 cache built before
 #       this guard existed may hold another company's numbers under our
 #       subscriber's company name — must be regenerated, not re-sent.
-SUMMARY_FORMAT_VERSION = 7
+#   8 = figure correctness (output.py). A v7 cache can hold values that are
+#       wrong on their face and must not be re-sent:
+#         • "₹1,07,496 Lakh" — only MISLABELLED denominations were rescaled to
+#           Cr, so a correctly-labelled lakh/million figure went out under its
+#           own name, and one message could mix Lakh and Cr rows.
+#         • "₹1,075 Cr" where the filing says ₹1,074.96 Cr — decimals were
+#           dropped above ₹1,000 Cr.
+#         • a LOSS printed "(20.00)" or "-₹20.00 Cr" read as +20.00, so a
+#           loss-to-profit quarter showed "+150.00% QoQ" and a loss showed as
+#           a profit.
+#         • periods emitted oldest-first were never re-ordered, inverting
+#           QoQ/YoY (-27.43% where the truth was +0.10%).
+SUMMARY_FORMAT_VERSION = 8
 
 
 
@@ -555,7 +567,11 @@ def _result_template_metrics(caption: str, periods_per_metric: int = 3,
 # Which metrics get the (limited) template blocks when a filing reports more
 # than fit. Ordered by what a subscriber cares about most; anything not listed
 # keeps its position after these, in the order the filing reported it.
-RESULT_METRIC_PRIORITY = ("REV", "PAT", "OPM", "EBITDA", "EPS")
+# PBT sits directly behind PAT. With nse_result_bits_3 unapproved, a filing
+# reporting REV + PBT + OPM degrades to the TWO-block template, and the old
+# ordering (PBT unlisted, so ranked last) kept revenue and margin and dropped
+# the PROFIT line entirely — a results alert with no profit figure in it.
+RESULT_METRIC_PRIORITY = ("REV", "PAT", "PBT", "OPM", "EBITDA", "EPS")
 
 
 def _result_metric_blocks(caption: str, periods_per_metric: int = 3,

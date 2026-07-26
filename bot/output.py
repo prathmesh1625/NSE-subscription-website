@@ -618,7 +618,10 @@ def verify_metrics_against_text(summary: "FinancialSummary", pdf_text: str) -> i
             num = re.search(r"-?\d[\d,]*\.?\d*", p.value or "")
             if not num:
                 continue
-            core     = num.group(0).replace(",", "").rstrip(".")
+            # Sign stripped: this is a FABRICATION check, and a loss the
+            # document prints "(20.00)" reaches us as "-₹20.00 Cr" (or the
+            # reverse), which would never match on the sign character.
+            core     = num.group(0).replace(",", "").lstrip("-").rstrip(".")
             int_part = core.split(".")[0]
             # Match the full number, or at least a 3+ digit integer part, in the
             # comma-stripped source text.
@@ -630,6 +633,32 @@ def verify_metrics_against_text(summary: "FinancialSummary", pdf_text: str) -> i
 
 
 _VALUE_NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+
+# A minus that sits BEFORE the currency symbol ("-₹20.00 Cr") or an accounting
+# bracket ("₹(20.00) Cr", "(20.00)") — the two ways an Indian results table
+# prints a LOSS. _VALUE_NUM_RE matches neither: its optional "-" has to sit
+# immediately left of a digit. Both forms therefore parsed as +20.00, so a
+# ₹20 Cr LOSS shipped as a ₹20 Cr PROFIT, the QoQ off it came out "+150.00%"
+# instead of a loss-to-profit swing, and recompute_changes' "base <= 0" guard
+# could never fire.
+_NEG_PREFIX_RE = re.compile(r"[-−–(]\s*(?:rs\.?|inr|₹|\$)?\s*$",
+                            re.IGNORECASE)
+
+
+def _signed_number(value: str) -> float | None:
+    """The number inside a metric VALUE *with its sign*, or None if there is
+    no number. Use this instead of _VALUE_NUM_RE wherever the magnitude is
+    used arithmetically — see _NEG_PREFIX_RE for why."""
+    if not value:
+        return None
+    m = _VALUE_NUM_RE.search(value)
+    if not m:
+        return None
+    num = float(m.group(0).replace(",", ""))
+    if num > 0 and _NEG_PREFIX_RE.search(value[:m.start()]):
+        return -num
+    return num
+
 
 # Multiply a figure in <scale> by this to get crore.
 _SCALE_TO_CRORE = {"lakh": 0.01, "crore": 1.0, "million": 0.1, "billion": 100.0}
@@ -662,22 +691,47 @@ def detect_document_scale(pdf_text: str) -> str | None:
     "Cr" (a silent 100x overstatement) — a bank PAT of ₹1,07,496 lakh was
     shipped as "₹1,07,496 Cr" in production. The document's own heading is a
     far more reliable signal than anything the model reports about units.
+
+    When a document states SEVERAL denominations — a P&L "(Rs. in Crore)" plus
+    notes or a shareholding table "in lakhs" — the heading printed NEAREST the
+    results table wins, not the most frequent one. A plain majority vote picked
+    "lakh" for a crore-denominated P&L carrying two lakhs notes, which would
+    have divided every correct figure by 100.
     """
     if not pdf_text:
         return None
-    counts = {}
+    matches = []
     for m in _DOC_SCALE_RE.finditer(pdf_text):
         scale = _SCALE_ALIASES.get(m.group(1).lower())
         if scale:
-            counts[scale] = counts.get(scale, 0) + 1
-    if not counts:
+            matches.append((m.start(), scale))
+    if not matches:
         return None
+
+    # The results table itself is the anchor: a denomination heading sits
+    # directly above the table it applies to.
+    low    = pdf_text.lower()
+    anchors = [low.find(k) for k in _METRIC_KEYWORDS if k in low]
+    if anchors:
+        anchor = min(anchors)
+        return min(matches, key=lambda sm: abs(sm[0] - anchor))[1]
+
+    counts = {}
+    for _, scale in matches:
+        counts[scale] = counts.get(scale, 0) + 1
     return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
-def _stated_scale(value: str, unit: str) -> str | None:
-    """The denomination a metric VALUE claims, from its own suffix first
-    ("₹1,075 Cr" → crore), falling back to the block's declared `unit`."""
+def _value_suffix_scale(value: str) -> str | None:
+    """
+    The denomination the VALUE ITSELF spells out ("₹1,075 Cr" → crore), or None
+    when it carries no suffix.
+
+    Deliberately ignores the block's `unit` field: this is the only signal
+    strong enough to RESCALE on. `unit` says what table the model read, not
+    what it wrote — trusting it would divide an already-converted "₹1,074.96"
+    labelled unit="lakh" by 100 all over again.
+    """
     low = (value or "").lower()
     if re.search(r"\blakhs?\b|\blacs?\b", low):
         return "lakh"
@@ -687,12 +741,21 @@ def _stated_scale(value: str, unit: str) -> str | None:
         return "billion"
     if re.search(r"\bcr\b|\bcrores?\b", low):
         return "crore"
-    return _SCALE_ALIASES.get((unit or "").lower())
+    return None
 
 
 def _format_crore(v: float) -> str:
-    """Render a crore figure the way the rest of the message does."""
-    return f"₹{v:,.2f} Cr" if abs(v) < 1000 else f"₹{v:,.0f} Cr"
+    """
+    Render a crore figure the way the rest of the message does.
+
+    Always two decimals. The old "drop the decimals above ₹1,000 Cr" rule
+    rendered a ₹1,07,496 lakh figure as "₹1,075 Cr" rather than the exact
+    "₹1,074.96 Cr" — a ₹4 lakh discrepancy against a filing the subscriber
+    can open and check line by line.
+
+    A loss reads "-₹20.00 Cr", not "₹-20.00 Cr".
+    """
+    return f"{'-' if v < 0 else ''}₹{abs(v):,.2f} Cr"
 
 
 # Metrics quoted PER SHARE (EPS, DPS, book value …). They are printed in the
@@ -713,7 +776,8 @@ def reconcile_metric_units(summary: "FinancialSummary", pdf_text: str,
                            doc_scale: str | None) -> int:
     """
     Re-label (and convert to crore) any metric value that was copied VERBATIM
-    off the source table but tagged with the wrong denomination.
+    off the source table but tagged with the wrong denomination — or with no
+    denomination at all.
 
     The verbatim check is what makes this safe: if the digits the model emitted
     appear as-is in the PDF, it transcribed the printed figure rather than
@@ -721,6 +785,14 @@ def reconcile_metric_units(summary: "FinancialSummary", pdf_text: str,
     (`doc_scale`), whatever the model labelled it. When the digits do NOT
     appear verbatim the model did its own conversion, and we leave it alone
     rather than risk double-converting a correct value.
+
+    Only an EXPLICIT suffix on the value counts as "already labelled" — the
+    block's `unit` field does not. A model that emitted a bare "858.67" off a
+    crore table had unit="crore", which matched doc_scale, so this skipped it
+    and the subscriber received "🗓️ Jun 2026: 858.67" with no currency and no
+    denomination at all. The verbatim gate is what makes trusting doc_scale
+    over `unit` safe here: a value the model had already converted itself
+    ("₹1,074.96" off a lakhs table) does not appear verbatim, so it is skipped.
 
     Returns the number of period values corrected.
     """
@@ -740,13 +812,62 @@ def reconcile_metric_units(summary: "FinancialSummary", pdf_text: str,
             num = _VALUE_NUM_RE.search(p.value)
             if not num:
                 continue
-            core = num.group(0).replace(",", "").rstrip(".")
+            # Digits only for the verbatim check — the sign is carried
+            # separately, since the document may print a loss in brackets
+            # ("(2,000)") where the value says "-2,000" or vice versa.
+            core = num.group(0).replace(",", "").lstrip("-").rstrip(".")
             # Only trust figures transcribed straight from the document.
             if not core or core not in text_digits:
                 continue
-            if _stated_scale(p.value, m.unit) == doc_scale:
-                continue                      # already labelled correctly
-            p.value = _format_crore(float(core) * _SCALE_TO_CRORE[doc_scale])
+            if _value_suffix_scale(p.value) == doc_scale:
+                continue        # already labelled correctly, and explicitly so
+            signed = _signed_number(p.value)
+            if signed is None:
+                continue
+            p.value = _format_crore(signed * _SCALE_TO_CRORE[doc_scale])
+            touched = True
+            fixed += 1
+        if touched:
+            m.unit = "crore"
+    return fixed
+
+
+def normalize_metric_units(summary: "FinancialSummary") -> int:
+    """
+    Convert every monetary value that spells out a NON-crore denomination into
+    crore, so one alert never mixes denominations and every alert is comparable
+    with the next.
+
+    reconcile_metric_units() above only rewrites values the model MISLABELLED.
+    A value the model labelled CORRECTLY off a lakhs table — "₹1,07,496 Lakh",
+    exactly what SYSTEM_PROMPT rule 5 asks it to produce — matched its
+    doc_scale and was left alone, so subscribers received "₹1,07,496 Lakh" for
+    one company and "₹858.67 Cr" for the next. Worse, a filing whose revenue
+    was transcribed verbatim (and so rescaled) alongside a PAT that wasn't
+    mixed BOTH denominations inside a single message.
+
+    Only an explicit suffix on the value triggers a conversion — see
+    _value_suffix_scale — and per-share metrics carry no denomination at all,
+    so they are skipped exactly as in reconcile_metric_units(). Idempotent: a
+    converted value states "Cr".
+
+    Returns the number of period values converted.
+    """
+    fixed = 0
+    for m in summary.metrics:
+        if _is_per_share(m.name, m.short_name):
+            continue
+        touched = False
+        for p in m.periods:
+            if not p.value or "%" in p.value:
+                continue
+            scale = _value_suffix_scale(p.value)
+            if scale is None or scale == "crore":
+                continue
+            num = _signed_number(p.value)
+            if num is None:
+                continue
+            p.value = _format_crore(num * _SCALE_TO_CRORE[scale])
             touched = True
             fixed += 1
         if touched:
@@ -777,10 +898,9 @@ def _value_to_crore(value: str, unit: str) -> float | None:
     """
     if not value or "%" in value:
         return None
-    m = _VALUE_NUM_RE.search(value)
-    if not m:
+    num = _signed_number(value)
+    if num is None:
         return None
-    num = float(m.group(0).replace(",", ""))
     low = value.lower()
     if "lakh" in low:
         return num / 100
@@ -813,13 +933,76 @@ def _period_magnitude(value: str, unit: str) -> float | None:
     if not value:
         return None
     if "%" in value:
-        m = _VALUE_NUM_RE.search(value)
-        return float(m.group(0).replace(",", "")) if m else None
+        return _signed_number(value)
     crore = _value_to_crore(value, unit)
     if crore is not None:
         return crore
-    m = _VALUE_NUM_RE.search(value)
-    return float(m.group(0).replace(",", "")) if m else None
+    return _signed_number(value)
+
+
+# Month names as they appear in a period label, and the two label shapes the
+# extractor produces: "Jun 2026" / "March 2026" / "Jun'25", and the raw column
+# header "30.06.2026".
+_MONTH_NUM = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_LABEL_DMY_RE   = re.compile(r"\b(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})\b")
+_LABEL_MONTH_RE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*'?(\d{2,4})\b",
+    re.IGNORECASE,
+)
+
+
+def _period_order_key(label: str):
+    """
+    (year, month, day) for a period label — "Jun 2026", "30.06.2026", "Jun'25".
+    None when the label carries no parsable month+year ("Q1 FY27", "FY 2025-26"),
+    which is the signal to leave the periods in the order the model emitted them.
+    """
+    if not label:
+        return None
+    m = _LABEL_DMY_RE.search(label)
+    if m:
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= month <= 12:
+            return (year, month, day)
+    m = _LABEL_MONTH_RE.search(label)
+    if m:
+        year = int(m.group(2))
+        if year < 100:
+            year += 2000
+        return (year, _MONTH_NUM[m.group(1)[:3].lower()], 0)
+    return None
+
+
+def order_periods(summary: "FinancialSummary") -> int:
+    """
+    Sort every metric's periods NEWEST FIRST.
+
+    recompute_changes() and both result templates assume
+    [current quarter, previous quarter, year-ago quarter]. SYSTEM_PROMPT asks
+    for that order but nothing enforced it, and a model that echoed the
+    table's own left-to-right order (oldest first) produced a QoQ of -27.43%
+    where the truth was +0.10% — correct figures, inverted change, and a 🔴
+    beside a quarter that actually grew.
+
+    Only reorders when EVERY label parses to a DISTINCT month+year: an
+    unparsable or duplicated label means we cannot be sure which period is
+    which, and the model's own ordering is then the better guess. Returns the
+    number of metrics reordered.
+    """
+    fixed = 0
+    for m in summary.metrics:
+        keys = [_period_order_key(p.period_label) for p in m.periods]
+        if len(keys) < 2 or any(k is None for k in keys) or len(set(keys)) != len(keys):
+            continue
+        ordered = sorted(m.periods, reverse=True,
+                         key=lambda p: _period_order_key(p.period_label))
+        if ordered != m.periods:
+            m.periods = ordered
+            fixed += 1
+    return fixed
 
 
 def recompute_changes(summary: "FinancialSummary") -> int:
@@ -832,9 +1015,12 @@ def recompute_changes(summary: "FinancialSummary") -> int:
     when the change is +14.59%. Periods are [current, prev quarter, year-ago],
     so QoQ compares [0] vs [1] and YoY [0] vs [2].
 
-    A zero or negative base is left alone — percent change off a loss or a nil
-    period is meaningless, and inventing one would be worse than the model's
-    guess. Returns the number of values corrected.
+    A zero or negative base reports "n/a": percent change off a loss or a nil
+    period is meaningless. This branch used to `continue`, keeping whatever the
+    model had invented — and now that _signed_number() actually detects a loss
+    printed as "(20.00)" or "-₹20.00 Cr", it is reachable, so a loss-to-profit
+    swing would otherwise ship the model's fabricated "+999%".
+    Returns the number of values corrected.
     """
     fixed = 0
     for m in summary.metrics:
@@ -844,7 +1030,12 @@ def recompute_changes(summary: "FinancialSummary") -> int:
         current = vals[0]
         for idx, attr in ((1, "qoq_change"), (2, "yoy_change")):
             base = vals[idx] if len(vals) > idx else None
-            if base is None or base <= 0:
+            if base is None:
+                continue
+            if base <= 0:
+                if getattr(m, attr, None) != "n/a":
+                    setattr(m, attr, "n/a")
+                    fixed += 1
                 continue
             computed = f"{(current - base) / base * 100:+.2f}"
             if getattr(m, attr, None) != computed:
@@ -868,8 +1059,8 @@ def drop_implausible_metrics(summary: "FinancialSummary") -> int:
         implausible = False
         for p in m.periods:
             if "%" in (p.value or ""):
-                num = _VALUE_NUM_RE.search(p.value)
-                if num and abs(float(num.group(0).replace(",", ""))) > _MAX_PLAUSIBLE_PERCENT:
+                num = _signed_number(p.value)
+                if num is not None and abs(num) > _MAX_PLAUSIBLE_PERCENT:
                     implausible = True
                     break
                 continue
@@ -1005,16 +1196,31 @@ def process_pdf(
                 if corrected:
                     print(f"      Document is denominated in {doc_scale} — "
                           f"re-scaled {corrected} mislabelled value(s) to Cr.", file=sys.stderr)
-            #  3. plausibility: drop what's still absurd for a quarterly figure
+            #  3. normalise: convert values CORRECTLY labelled in a non-crore
+            #     denomination ("₹1,07,496 Lakh") to Cr too, so no message
+            #     mixes denominations. Must run AFTER reconciliation, which
+            #     depends on the model's original labels being intact.
+            normalised = normalize_metric_units(summary)
+            if normalised:
+                print(f"      Converted {normalised} value(s) from lakh/million/"
+                      f"billion to Cr.", file=sys.stderr)
+            #  4. plausibility: drop what's still absurd for a quarterly figure
             #     (e.g. a balance-sheet total misread as Revenue/PAT).
             plausible = drop_implausible_metrics(summary)
             if plausible != verified:
                 print(f"      Dropped {verified - plausible} metric(s) with "
                       f"implausible magnitude.", file=sys.stderr)
-            #  4. changes: recompute QoQ/YoY from the (now verified, correctly
-            #     scaled) period values. Must run LAST — reconciliation rewrites
-            #     values, and a change computed before that would describe the
-            #     pre-correction numbers.
+            #  5. order: put each metric's periods newest-first, so the change
+            #     below compares the right pair and the rows read in the order
+            #     the template's headings imply.
+            reordered = order_periods(summary)
+            if reordered:
+                print(f"      Re-ordered periods newest-first for {reordered} "
+                      f"metric(s).", file=sys.stderr)
+            #  6. changes: recompute QoQ/YoY from the (now verified, correctly
+            #     scaled, correctly ordered) period values. Must run LAST —
+            #     the steps above rewrite values and their order, and a change
+            #     computed before them would describe the pre-correction numbers.
             recomputed = recompute_changes(summary)
             if recomputed:
                 print(f"      Recomputed {recomputed} QoQ/YoY value(s) from the "
