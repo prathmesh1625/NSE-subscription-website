@@ -568,6 +568,139 @@ def admin_openai_cost_today():
         return jsonify({"success": False, "message": "Failed to load OpenAI cost"}), 500
 
 
+def _preview_report_html(report: dict) -> str:
+    """Render a preview.preview_pdf() report dict as an HTML fragment."""
+    import html as html_lib
+    esc = html_lib.escape
+
+    ext = report["extraction"]
+    rd  = report["results_detection"]
+    parts = [
+        "<h2>Extraction</h2>",
+        f"<p>{ext['chars']} characters extracted</p>",
+    ]
+    if ext.get("note"):
+        parts.append(f"<p><em>{esc(ext['note'])}</em></p>")
+    parts += [
+        "<h2>Results detection</h2>",
+        f"<p>{esc(rd['reason'])}</p>",
+        "<h2>AI summary</h2>",
+        f"<p>{esc(str(report.get('summary_status', 'n/a')))}</p>",
+    ]
+
+    if report.get("used_fallback_caption"):
+        parts.append(
+            "<p style='color:#b00020'><strong>No AI summary &mdash; the "
+            "messages below are the bare fallback caption that subscribers "
+            "actually receive.</strong></p>"
+        )
+
+    parts.append("<h2>Open-window message (free-form text, 24h window open)</h2>")
+    parts.append(f"<pre class='msg'>{esc(report['open_window_message'])}</pre>")
+
+    cw = report["closed_window"]
+    parts.append(
+        f"<h2>Closed-window message (template: {esc(cw['template_name'])}, "
+        f"route={esc(cw['route'])}, {cw['param_count']} params)</h2>"
+    )
+    if cw["rendered_message"]:
+        parts.append(f"<pre class='msg'>{esc(cw['rendered_message'])}</pre>")
+    else:
+        parts.append(f"<p style='color:#b00020'>{esc(cw['render_warning'] or '')}</p>")
+        rows = "".join(
+            f"<tr><td>{{{{{i}}}}}</td><td>{esc(str(p))}</td></tr>"
+            for i, p in enumerate(cw["params"], 1)
+        )
+        parts.append(f"<table class='params'>{rows}</table>")
+    return "\n".join(parts)
+
+
+@app.route("/admin/preview", methods=["GET", "POST"])
+def admin_preview():
+    """
+    Internal testing tool: upload a filing PDF and see EXACTLY what
+    subscribers would receive — the open-window free-form text AND the
+    closed-window approved-template render — WITHOUT sending a real
+    WhatsApp message or touching bot_data.db / PostgreSQL. See
+    bot/preview.py for the underlying (side-effect-free) pipeline.
+
+    This is a browser page, not a server-to-server call, so the shared
+    admin secret rides as ?key=... instead of the x-bot-admin-key header
+    the other /admin/* JSON endpoints use — same secret either way.
+    """
+    import html as html_lib
+
+    expected = config.BOT_ADMIN_KEY
+    provided = request.values.get("key", "")
+    if not expected:
+        return "Admin API is not configured on this server (set BOT_ADMIN_KEY).", 500
+    if not hmac.compare_digest(provided, expected):
+        return "Missing or invalid ?key=.", 401
+
+    result_html = ""
+    if request.method == "POST":
+        pdf_file = request.files.get("pdf")
+        if not pdf_file or not pdf_file.filename:
+            result_html = "<p style='color:#b00020'>No PDF selected.</p>"
+        else:
+            import tempfile
+            import preview as preview_mod
+
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    pdf_file.save(tmp.name)
+                    tmp_path = tmp.name
+                report = preview_mod.preview_pdf(
+                    tmp_path,
+                    provider=request.form.get("provider") or None,
+                    company=request.form.get("company") or None,
+                    symbol=request.form.get("symbol") or "N/A",
+                    filing_type=request.form.get("filing_type") or "Investor Filing",
+                )
+                result_html = _preview_report_html(report)
+            except Exception as e:
+                result_html = f"<p style='color:#b00020'>Preview failed: {html_lib.escape(str(e))}</p>"
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+    key_attr = html_lib.escape(provided)
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>EquityAlerts — Message Preview</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }}
+  form {{ display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin-bottom: 1.5rem; }}
+  label {{ display: flex; flex-direction: column; font-size: 0.85rem; gap: 0.25rem; }}
+  input, select {{ padding: 0.4rem; font-size: 0.9rem; }}
+  button {{ padding: 0.5rem 1rem; }}
+  pre.msg {{ background: #f5f5f5; padding: 1rem; white-space: pre-wrap; border-radius: 6px; border: 1px solid #ddd; }}
+  table.params {{ border-collapse: collapse; width: 100%; }}
+  table.params td {{ border: 1px solid #ddd; padding: 0.3rem 0.6rem; font-family: monospace; font-size: 0.85rem; }}
+</style></head>
+<body>
+  <h1>EquityAlerts — Message Preview</h1>
+  <p>Upload a filing PDF to see the exact WhatsApp message(s) it would produce, without sending anything.</p>
+  <form method="post" enctype="multipart/form-data">
+    <input type="hidden" name="key" value="{key_attr}">
+    <label>PDF file<input type="file" name="pdf" accept="application/pdf" required></label>
+    <label>Company<input type="text" name="company" placeholder="e.g. Asian Paints Limited"></label>
+    <label>Symbol<input type="text" name="symbol" placeholder="e.g. ASIANPAINT"></label>
+    <label>Filing type<input type="text" name="filing_type" value="Investor Filing"></label>
+    <label>Provider
+      <select name="provider">
+        <option value="">(default: {config.SUMMARY_PROVIDER})</option>
+        <option value="openai">openai</option>
+        <option value="google">google</option>
+        <option value="anthropic">anthropic</option>
+      </select>
+    </label>
+    <button type="submit">Preview</button>
+  </form>
+  {result_html}
+</body></html>"""
+
+
 # ── Serve React portal (static files) ────────────────────────
 
 PORTAL_DIST = os.path.join(

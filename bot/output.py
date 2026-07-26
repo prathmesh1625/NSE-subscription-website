@@ -398,6 +398,45 @@ def _build_stock_bits_message(
     return "\n".join(lines)
 
 
+# Abbreviations the model gets wrong often enough to correct on sight, as
+# (name substrings, correct abbreviation). It routinely tags a "Profit before
+# tax" block short_name="PAT" — rendering the self-contradicting heading
+# "Profit before tax (PAT):" and, downstream, letting a pre-tax figure fill
+# the results template's fixed "Profit After Tax" slot.
+_SHORT_FIXUPS = (
+    (("before tax", "before exceptional", "pre-tax"), "PBT"),
+)
+
+
+def _canonical_short(name: str, short: str) -> str:
+    """Correct an abbreviation that contradicts the metric's own name."""
+    low = (name or "").lower()
+    for needles, correct in _SHORT_FIXUPS:
+        if any(n in low for n in needles):
+            return correct
+    return short
+
+
+def _metric_label(name: str, short: str) -> str:
+    """
+    "Revenue", "REV" -> "Revenue (REV):".
+
+    The model often already carries the abbreviation inside the name
+    ("Basic Earnings Per Share (EPS)"), which naively appending short_name
+    turned into "Basic Earnings Per Share (EPS) (EPS):". Strip a trailing
+    parenthetical that just repeats the abbreviation, correct an abbreviation
+    that contradicts the name, and drop the suffix entirely when there is no
+    abbreviation to add.
+    """
+    name  = (name or "").strip()
+    short = (short or "").strip()
+    if short:
+        name = re.sub(r"\s*\(\s*" + re.escape(short) + r"\s*\)\s*$", "",
+                      name, flags=re.IGNORECASE).strip()
+    short = _canonical_short(name, short)
+    return f"{name} ({short}):" if short else f"{name}:"
+
+
 def format_whatsapp_message(
     summary: FinancialSummary,
     equisense_url: str = "https://equityalerts.in/portal",
@@ -431,7 +470,7 @@ def format_whatsapp_message(
     lines.append("📊 Key Metrics")
     for m in summary.metrics:
         lines.append("")
-        lines.append(f"{m.name} ({m.short_name}):")
+        lines.append(_metric_label(m.name, m.short_name))
         for p in m.periods:
             lines.append(f"🗓️ {p.period_label}: {p.value}")
         lines.append(
@@ -642,6 +681,20 @@ def _format_crore(v: float) -> str:
     return f"₹{v:,.2f} Cr" if abs(v) < 1000 else f"₹{v:,.0f} Cr"
 
 
+# Metrics quoted PER SHARE (EPS, DPS, book value …). They are printed in the
+# same table as the crore figures but are NOT denominated in it, so the
+# reconciliation below must leave them alone: an EPS of ₹12.11 per share was
+# being relabelled "₹12.11 Cr" off a crore table and — worse — RESCALED to
+# "₹0.12 Cr" off a lakhs one, destroying the value outright.
+_PER_SHARE_RE = re.compile(r"per\s+share|\beps\b|\bdps\b|book\s+value",
+                           re.IGNORECASE)
+
+
+def _is_per_share(name: str, short: str) -> bool:
+    """True for per-share metrics, which carry no crore/lakh denomination."""
+    return bool(_PER_SHARE_RE.search(f"{name or ''} {short or ''}"))
+
+
 def reconcile_metric_units(summary: "FinancialSummary", pdf_text: str,
                            doc_scale: str | None) -> int:
     """
@@ -662,6 +715,10 @@ def reconcile_metric_units(summary: "FinancialSummary", pdf_text: str,
     text_digits = re.sub(r"[,\s]", "", pdf_text or "")
     fixed = 0
     for m in summary.metrics:
+        # A per-share figure is not in the table's denomination — converting
+        # it to crore is always wrong, however verbatim the digits are.
+        if _is_per_share(m.name, m.short_name):
+            continue
         touched = False
         for p in m.periods:
             if not p.value or "%" in p.value:
@@ -731,6 +788,55 @@ def _value_to_crore(value: str, unit: str) -> float | None:
     if unit == "crore":
         return num
     return None
+
+
+def _period_magnitude(value: str, unit: str) -> float | None:
+    """
+    Comparable magnitude for one period value. Percent metrics compare as
+    plain numbers; money metrics normalise to crore so a QoQ isn't computed
+    across two different denominations. None when nothing parses.
+    """
+    if not value:
+        return None
+    if "%" in value:
+        m = _VALUE_NUM_RE.search(value)
+        return float(m.group(0).replace(",", "")) if m else None
+    crore = _value_to_crore(value, unit)
+    if crore is not None:
+        return crore
+    m = _VALUE_NUM_RE.search(value)
+    return float(m.group(0).replace(",", "")) if m else None
+
+
+def recompute_changes(summary: "FinancialSummary") -> int:
+    """
+    Derive QoQ / YoY from the extracted period values instead of trusting the
+    model's own arithmetic.
+
+    The model's numbers were neither correct nor stable: the same filing run
+    twice reported OPM (18.5% → 21.2%) as "+1.27% QoQ" and then "+14.86% QoQ",
+    when the change is +14.59%. Periods are [current, prev quarter, year-ago],
+    so QoQ compares [0] vs [1] and YoY [0] vs [2].
+
+    A zero or negative base is left alone — percent change off a loss or a nil
+    period is meaningless, and inventing one would be worse than the model's
+    guess. Returns the number of values corrected.
+    """
+    fixed = 0
+    for m in summary.metrics:
+        vals = [_period_magnitude(p.value, m.unit) for p in m.periods]
+        if not vals or vals[0] is None:
+            continue
+        current = vals[0]
+        for idx, attr in ((1, "qoq_change"), (2, "yoy_change")):
+            base = vals[idx] if len(vals) > idx else None
+            if base is None or base <= 0:
+                continue
+            computed = f"{(current - base) / base * 100:+.2f}"
+            if getattr(m, attr, None) != computed:
+                setattr(m, attr, computed)
+                fixed += 1
+    return fixed
 
 
 def drop_implausible_metrics(summary: "FinancialSummary") -> int:
@@ -835,6 +941,14 @@ def process_pdf(
             if plausible != verified:
                 print(f"      Dropped {verified - plausible} metric(s) with "
                       f"implausible magnitude.", file=sys.stderr)
+            #  4. changes: recompute QoQ/YoY from the (now verified, correctly
+            #     scaled) period values. Must run LAST — reconciliation rewrites
+            #     values, and a change computed before that would describe the
+            #     pre-correction numbers.
+            recomputed = recompute_changes(summary)
+            if recomputed:
+                print(f"      Recomputed {recomputed} QoQ/YoY value(s) from the "
+                      f"extracted figures.", file=sys.stderr)
         except Exception as e:
             print(f"      Financial extraction failed ({e}) — will use content summary.", file=sys.stderr)
     else:

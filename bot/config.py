@@ -257,6 +257,98 @@ TEMPLATE_RESULT_NAME_1 = os.environ.get("TEMPLATE_RESULT_NAME_1", "nse_result_bi
 TEMPLATE_RESULT_NAME_2 = os.environ.get("TEMPLATE_RESULT_NAME_2", "nse_result_bits_2")
 TEMPLATE_RESULT_NAME_3 = os.environ.get("TEMPLATE_RESULT_NAME_3", "")
 
+# ── Approved template FIXED TEXT, keyed by template name ─────────────────
+# The bodies above only ever existed as comments — nobody could see the
+# literal message a template send would render without actually sending one
+# to a real subscriber. This is the same fixed text, copied verbatim from
+# what's approved in WhatsApp Manager, so bot/preview.py can substitute the
+# {{n}} params db_watcher.resolve_template_send() computes and show the
+# exact WhatsApp bubble before anything goes out. Keep these in sync with
+# WhatsApp Manager by hand — Meta has no API to read a template body back.
+TEMPLATE_BODIES = {
+    TEMPLATE_NAME: (
+        "{{1}}\n\n{{2}}\n\n{{3}}\n\n{{4}}\n\n"
+        "🔗 Download filing:\n{{5}}\n\n"
+        "You are receiving this stock update per your request on https://equityalerts.in/portal\n"
+        "Disclaimer: https://equityalerts.in/portal/disclaimer"
+    ),
+    TEMPLATE_RESULT_NAME: (
+        "📊 Quarterly results filed for a company in your subscription.\n\n"
+        "💼 {{1}}\n\n"
+        "🕒 Filed on exchange: {{2}}\n\n"
+        "Key metrics\n\n"
+        "Revenue (REV):\n🗓️ {{3}}\n🗓️ {{4}}\n🗓️ {{5}}\nChange: {{6}}\n\n"
+        "Profit After Tax (PAT):\n🗓️ {{7}}\n🗓️ {{8}}\n🗓️ {{9}}\nChange: {{10}}\n\n"
+        "Operating Profit Margin (OPM):\n🗓️ {{11}}\n🗓️ {{12}}\n🗓️ {{13}}\nChange: {{14}}\n\n"
+        "Filing and details: {{15}}\n\n"
+        "You are receiving this stock update per your request on https://equityalerts.in/portal\n"
+        "Disclaimer: https://equityalerts.in/portal/disclaimer"
+    ),
+    TEMPLATE_RESULT_NAME_1: (
+        "📊 Quarterly results filed for a company in your subscription.\n\n"
+        "💼 {{1}}\n\n"
+        "🕒 Filed on exchange: {{2}}\n\n"
+        "Key metrics\n\n"
+        "{{3}}\n🗓️ {{4}}\n🗓️ {{5}}\n🗓️ {{6}}\nChange: {{7}}\n\n"
+        "Figures as reported by the company in its exchange filing.\n\n"
+        "Filing and details: {{8}}\n\n"
+        "You are receiving this stock update per your request on https://equityalerts.in/portal\n"
+        "Disclaimer: https://equityalerts.in/portal/disclaimer"
+    ),
+    TEMPLATE_RESULT_NAME_2: (
+        "📊 Quarterly results filed for a company in your subscription.\n\n"
+        "💼 {{1}}\n\n"
+        "🕒 Filed on exchange: {{2}}\n\n"
+        "Key metrics\n\n"
+        "{{3}}\n🗓️ {{4}}\n🗓️ {{5}}\n🗓️ {{6}}\nChange: {{7}}\n\n"
+        "{{8}}\n🗓️ {{9}}\n🗓️ {{10}}\n🗓️ {{11}}\nChange: {{12}}\n\n"
+        "Figures as reported by the company in its exchange filing.\n\n"
+        "Filing and details: {{13}}\n\n"
+        "You are receiving this stock update per your request on https://equityalerts.in/portal\n"
+        "Disclaimer: https://equityalerts.in/portal/disclaimer"
+    ),
+    # Not yet approved (TEMPLATE_RESULT_NAME_3 is ""), but keeping the body
+    # ready means the preview tool renders it correctly the day it is —
+    # rather than someone having to remember to update this file too.
+    "nse_result_bits_3": (
+        "📊 Quarterly results filed for a company in your subscription.\n\n"
+        "💼 {{1}}\n\n"
+        "🕒 Filed on exchange: {{2}}\n\n"
+        "Key metrics\n\n"
+        "{{3}}\n🗓️ {{4}}\n🗓️ {{5}}\n🗓️ {{6}}\nChange: {{7}}\n\n"
+        "{{8}}\n🗓️ {{9}}\n🗓️ {{10}}\n🗓️ {{11}}\nChange: {{12}}\n\n"
+        "{{13}}\n🗓️ {{14}}\n🗓️ {{15}}\n🗓️ {{16}}\nChange: {{17}}\n\n"
+        "Figures as reported by the company in its exchange filing.\n\n"
+        "Filing and details: {{18}}\n\n"
+        "You are receiving this stock update per your request on https://equityalerts.in/portal\n"
+        "Disclaimer: https://equityalerts.in/portal/disclaimer"
+    ),
+}
+# "" is not a real template name (it means "not configured") — drop any
+# entry that collapsed onto that key so a lookup miss reliably means
+# "no body known for this template", not garbage from an unset name.
+TEMPLATE_BODIES.pop("", None)
+
+
+def render_template_body(template_name: str, params: list) -> str | None:
+    """
+    Substitute `params` into the approved fixed text for `template_name`,
+    exactly like Meta would render it. Returns None when the body isn't
+    known (template not yet added to TEMPLATE_BODIES above) or the param
+    count doesn't match what the body expects — callers should fall back to
+    showing the raw params list rather than a silently wrong render.
+    """
+    body = TEMPLATE_BODIES.get(template_name or "")
+    if body is None:
+        return None
+    expected = body.count("{{")
+    if len(params) != expected:
+        return None
+    rendered = body
+    for i, p in enumerate(params, start=1):
+        rendered = rendered.replace("{{%d}}" % i, str(p))
+    return rendered
+
 
 def result_template_for(block_count: int) -> str:
     """The approved template name for a results alert with `block_count`

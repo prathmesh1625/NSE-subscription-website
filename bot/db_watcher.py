@@ -348,7 +348,17 @@ def _format_exchange_time(raw) -> str:
 #       the CONTENT changed, not the layout: summaries cached at v3 hold
 #       mislabelled figures (a lakhs table transcribed as "Cr" overstates 100x)
 #       and would otherwise be re-sent verbatim, never seeing the new guards.
-SUMMARY_FORMAT_VERSION = 4
+#   5 = correctness fixes, all CONTENT again — a v4 cache holds values that are
+#       simply wrong and must not be re-sent:
+#         • per-share metrics no longer forced into crore (an EPS of ₹12.11
+#           was shipped as "₹12.11 Cr", or rescaled to "₹0.12 Cr" off a lakhs
+#           table);
+#         • QoQ/YoY recomputed from the figures instead of trusting the model
+#           (the same filing reported one margin as +1.27% and +14.86% on two
+#           runs; the true change was +14.59%);
+#         • abbreviations that contradict the metric name corrected, so a
+#           "Profit before tax" block can no longer be labelled PAT.
+SUMMARY_FORMAT_VERSION = 5
 
 
 
@@ -359,20 +369,67 @@ SUMMARY_FORMAT_VERSION = 4
 # The price is that whatever the extractor found has to be matched ONTO those
 # three slots; metrics outside them (EBITDA, EPS …) are dropped from the
 # closed-window template. The free-form text alert still carries all of them.
+# (slot, name keywords that FIT the slot, name keywords that DISQUALIFY it).
+# The exclusions are load-bearing: the extractor labelled a "Profit before
+# tax" block short_name="PAT", and the fixed heading then presented
+# ₹1,558.75 Cr of PRE-tax profit as "Profit After Tax" — a 34% overstatement
+# (the real PAT that quarter was ₹1,160.74 Cr). A slot must never be filled
+# by a metric whose own name contradicts the heading.
 RESULT_TEMPLATE_SLOTS = (
     ("REV", ("revenue", "total income", "net sales", "turnover",
-             "income from operations")),
-    ("PAT", ("profit after tax", "net profit", "profit for the period")),
-    ("OPM", ("operating profit margin", "operating margin", "ebitda margin")),
+             "income from operations"), ()),
+    ("PAT", ("profit after tax", "net profit", "profit for the period"),
+             ("before tax", "before exceptional", "pre-tax", "pbt")),
+    ("OPM", ("operating profit margin", "operating margin", "ebitda margin"),
+             ()),
 )
+
+
+def _slot_rank(block: dict, short: str, keywords, exclusions) -> int:
+    """
+    How well `block` fits a fixed template slot:
+        2 = its NAME says so, 1 = only the model's abbreviation says so, 0 = no.
+
+    Name beats abbreviation because the model's short_name is the unreliable
+    field — trusting it first is exactly what let a before-tax figure fill the
+    PAT slot. `exclusions` veto outright rather than merely down-rank.
+    """
+    name = (block.get("name") or "").lower()
+    if any(x in name for x in exclusions):
+        return 0
+    if any(k in name for k in keywords):
+        return 2
+    if block.get("short") == short:
+        return 1
+    return 0
+
+
+# Abbreviations the extractor gets wrong often enough to correct on sight,
+# as (name substrings, correct abbreviation). Without this the per-count
+# result templates — which carry the heading as a VARIABLE — would render a
+# self-contradicting "Profit before tax (PAT):".
+_SHORT_FIXUPS = (
+    (("before tax", "before exceptional", "pre-tax"), "PBT"),
+)
+
+
+def _canonical_short(name: str, short: str) -> str:
+    """Correct an abbreviation that contradicts the metric's own name."""
+    low = (name or "").lower()
+    for needles, correct in _SHORT_FIXUPS:
+        if any(n in low for n in needles):
+            return correct
+    return short
 
 
 def _metric_block(head: str, periods: list, trend: str) -> dict:
     """Split a metric heading ("Revenue from Operations (REV)") into name + short."""
-    sm = re.search(r"\(([A-Za-z]{2,})\)\s*$", head)
+    sm    = re.search(r"\(([A-Za-z]{2,})\)\s*$", head)
+    name  = re.sub(r"\s*\([A-Za-z]{2,}\)\s*$", "", head).strip()
+    short = (sm.group(1).upper() if sm else "")
     return {
-        "short":   (sm.group(1).upper() if sm else ""),
-        "name":    re.sub(r"\s*\([A-Za-z]{2,}\)\s*$", "", head).strip(),
+        "short":   _canonical_short(name, short),
+        "name":    name,
         "periods": periods,
         "trend":   trend,
     }
@@ -452,16 +509,20 @@ def _result_template_metrics(caption: str, periods_per_metric: int = 3,
     rev_filled = False
     filled     = 0
 
-    for short, keywords in RESULT_TEMPLATE_SLOTS:
-        hit = None
+    for short, keywords, exclusions in RESULT_TEMPLATE_SLOTS:
+        # Take the BEST-ranked unused block for this slot, not merely the
+        # first one that matches somehow — a name match must win over an
+        # abbreviation match even when the abbreviation appears earlier.
+        hit, best_rank, best_i = None, 0, None
         for i, b in enumerate(blocks):
             if i in used:
                 continue
-            name = b["name"].lower()
-            if b["short"] == short or any(k in name for k in keywords):
-                hit = b
-                used.add(i)
-                break
+            rank = _slot_rank(b, short, keywords, exclusions)
+            if rank > best_rank:
+                best_rank, best_i = rank, i
+        if best_i is not None:
+            hit = blocks[best_i]
+            used.add(best_i)
         rows  = [p for p in (hit["periods"] if hit else []) if p][:periods_per_metric]
         if rows:
             filled += 1
@@ -818,6 +879,88 @@ def _parse_stock_bits_parts(caption: str):
     return title, company, event, body, url, filed
 
 
+def resolve_template_send(caption: str) -> dict:
+    """
+    PURE decision: given a caption, which approved WhatsApp template a
+    closed-window (or forced-template) delivery would use, and what its
+    rendered {{n}} params would be. No DB access, no network call — this is
+    the exact routing logic _try_send() uses to actually send, extracted so
+    a preview/testing tool can call it and see precisely what production
+    would do, without sending a real message.
+
+    Returns {"route": "result_count" | "result_legacy" | "stock_bits",
+             "template_name": str, "params": [str, ...]}.
+    `template_name` is "" when no template is configured for that route.
+    """
+    title, company, event, body, url, filed = _parse_stock_bits_parts(caption)
+
+    if _is_result_caption(caption):
+        periods = int(getattr(config, "TEMPLATE_RESULT_PERIOD_SLOTS", 3))
+        cline   = (f"{company} | {event}" if event else company) or "Results Out"
+
+        # ── Preferred: a template sized to the metrics we actually have.
+        blocks     = _result_metric_blocks(caption, periods, max_blocks=3)
+        result_tpl = getattr(config, "TEMPLATE_RESULT_NAME", "") or ""
+        # The legacy fixed-heading template covers the 3 × REV/PAT/OPM case
+        # correctly, so try it BEFORE degrading — degrading first would drop
+        # OPM from a filing that reported all three.
+        legacy_ok = bool(
+            result_tpl and len(blocks) == 3
+            and _result_template_metrics(caption, periods, require_all=True)
+        )
+        count_tpl = ""
+        if blocks and hasattr(config, "result_template_for"):
+            count_tpl = config.result_template_for(len(blocks))
+            if not count_tpl and not legacy_ok:
+                for n in range(len(blocks) - 1, 0, -1):
+                    count_tpl = config.result_template_for(n)
+                    if count_tpl:
+                        blocks = blocks[:n]
+                        break
+        if count_tpl:
+            params = [cline, filed or "n/a"]
+            for b in blocks:
+                params.append(b["heading"])
+                params.extend(b["rows"])
+                params.append(b["change"])
+            params.append(url or "https://equityalerts.in")
+            return {"route": "result_count", "template_name": count_tpl, "params": params}
+
+        # ── Fallback: the fixed-heading REV/PAT/OPM template.
+        metrics = (_result_template_metrics(caption, periods, require_all=True)
+                   if result_tpl else [])
+        if metrics:
+            params = [cline, filed or "n/a", *metrics, url or "https://equityalerts.in"]
+            return {"route": "result_legacy", "template_name": result_tpl, "params": params}
+        # Neither result template matched (e.g. only 1-2 metrics but no
+        # per-count template configured for that size AND not all 3 fixed
+        # slots filled) — falls through to the Stock Bits template below,
+        # same as the original inline logic.
+
+    # The branded TITLE and the 🏢/⚡/🤖 emojis ride INSIDE the variable
+    # values (not the approved template's fixed text) — so the template's
+    # fixed text stays neutral/Utility while the "📢 EquityAlerts … Bits!!"
+    # header and markers still show. Meta's category check looks at the
+    # fixed text only, so this is safe.
+    title = title or "📢 *EquityAlerts Stock Bits!!*"
+    if company:
+        company = f"🏢 {company}"
+    # The exchange time has no variable of its own (no new template), so it
+    # rides on the event line: "⚡ <event> · 🕒 Filed <time>".
+    event = f"⚡ {event}" if event else ""
+    if filed:
+        event = (f"{event} · 🕒 Filed {filed}" if event
+                 else f"🕒 Filed on exchange: {filed}")
+    if body:
+        body = f"🤖 {body}"
+    url = url or "https://equityalerts.in"
+    return {
+        "route": "stock_bits",
+        "template_name": getattr(config, "TEMPLATE_NAME", "") or "",
+        "params": [title, company, event, body, url],
+    }
+
+
 def _try_send(phone, file_path, caption, file_key, filing_id=None,
               template_params=None, force_template=False):
     """
@@ -920,119 +1063,12 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
             print(f"🔕 Template already sent to {phone} this window — queued {file_key}.")
             return False
         try:
-            # SPACED template: one single-line variable per section so the
-            # template's own fixed newlines provide the spacing (Meta strips
-            # newlines from a variable). Body {{1..4}} = company, event,
-            # summary, download link.
-            title, company, event, body, url, filed = _parse_stock_bits_parts(caption)
-
-            # ── RESULTS → dedicated metrics-table template (if approved) ──────
-            # A metrics table can't render in the Stock Bits template (one line
-            # per variable), so results go to their own template: a metric per
-            # block, 3 period rows + a change row each. Preferred route is the
-            # template matching the NUMBER of metrics the filing reported (see
-            # config.TEMPLATE_RESULT_NAME_1/2/3); the fixed-heading
-            # TEMPLATE_RESULT_NAME is the fallback until those are approved.
-            # Route to a results template whenever the topic/event line below
-            # the company says "Results Out" — this catches BOTH the structured
-            # Result Bits layout (💼 … | … Results Out / 📊 metrics) AND a flat
-            # Stock Bits summary of a results filing (⚡ … Results Out). Anything
-            # else stays on the earlier Stock Bits template (TEMPLATE_NAME).
-            is_result = _is_result_caption(caption)
-            if is_result:
-                periods = int(getattr(config, "TEMPLATE_RESULT_PERIOD_SLOTS", 3))
-                cline   = (f"{company} | {event}" if event else company) or "Results Out"
-                sent    = False
-
-                # ── Preferred: a template sized to the metrics we actually have.
-                # A template renders every fixed line unconditionally, so a
-                # 1-metric filing in the 3-metric template shows two headings
-                # over rows of "—". Picking the template by block count is what
-                # keeps those off subscribers' screens.
-                #
-                # Degrades DOWNWARD: with only the 1- and 2-metric templates
-                # approved, a 3-metric filing sends its top 2 metrics rather
-                # than falling back to a layout that would show dashes. Better
-                # to omit a metric than to render an empty one.
-                blocks    = _result_metric_blocks(caption, periods, max_blocks=3)
-                result_tpl = getattr(config, "TEMPLATE_RESULT_NAME", "") or ""
-                # The legacy fixed-heading template covers the 3 × REV/PAT/OPM
-                # case correctly, so try it BEFORE degrading — degrading first
-                # would drop OPM from a filing that reported all three.
-                legacy_ok = bool(
-                    result_tpl and len(blocks) == 3
-                    and _result_template_metrics(caption, periods, require_all=True)
-                )
-                count_tpl = ""
-                if blocks and hasattr(config, "result_template_for"):
-                    count_tpl = config.result_template_for(len(blocks))
-                    if not count_tpl and not legacy_ok:
-                        for n in range(len(blocks) - 1, 0, -1):
-                            count_tpl = config.result_template_for(n)
-                            if count_tpl:
-                                blocks = blocks[:n]
-                                break
-                if count_tpl:
-                    params = [cline, filed or "n/a"]
-                    for b in blocks:
-                        params.append(b["heading"])
-                        params.extend(b["rows"])
-                        params.append(b["change"])
-                    params.append(url or "https://equityalerts.in")
-                    wamid = whatsapp.send_text_template(phone, params,
-                                                        template_name=count_tpl)
-                    sent = True
-
-                # ── Fallback: the fixed-heading REV/PAT/OPM template, for as
-                # long as the per-count templates aren't approved yet. Its
-                # headings are FIXED TEXT, so it's only correct when the filing
-                # reported exactly those three — require_all=True makes it
-                # return [] otherwise, dropping us to the Stock Bits summary
-                # rather than sending a table with dash rows.
-                if not sent:
-                    metrics = (_result_template_metrics(caption, periods, require_all=True)
-                               if result_tpl else [])
-                    if metrics:
-                        params = [
-                            cline,
-                            filed or "n/a",
-                            *metrics,
-                            url or "https://equityalerts.in",
-                        ]
-                        wamid = whatsapp.send_text_template(phone, params,
-                                                            template_name=result_tpl)
-                        sent = True
-
-                if sent:
-                    bot_db.mark_batch_template_sent(phone)
-                    bot_db.mark_filing_sent(phone, file_key)
-                    bot_db.remove_pending_filing(phone, file_key)
-                    if wamid:
-                        bot_db.store_wamid(wamid, phone, file_key, file_path, caption,
-                                           filing_id=filing_id, channel="template")
-                    whatsapp._safe_print(f"[OK] Sent RESULT template to {phone} for {file_key}")
-                    return True
-
-            # The branded TITLE and the 🏢/⚡/🤖 emojis ride INSIDE the variable
-            # values (not the approved template's fixed text) — so the template's
-            # fixed text stays neutral/Utility while the "📢 EquityAlerts … Bits!!"
-            # header and markers still show. Meta's category check looks at the
-            # fixed text only, so this is safe.
-            title = title or "📢 *EquityAlerts Stock Bits!!*"
-            if company:
-                company = f"🏢 {company}"
-            # The exchange time has no variable of its own (no new template), so it
-            # rides on the event line: "⚡ <event> · 🕒 Filed <time>".
-            event = f"⚡ {event}" if event else ""
-            if filed:
-                event = (f"{event} · 🕒 Filed {filed}" if event
-                         else f"🕒 Filed on exchange: {filed}")
-            if body:
-                body = f"🤖 {body}"
-            url = url or "https://equityalerts.in"
-            # {{1}}=title, {{2}}=company, {{3}}=event(+time), {{4}}=summary, {{5}}=link
+            # Routing (which template + rendered params) is decided by the
+            # PURE resolve_template_send() so preview/testing tooling can
+            # compute the identical decision without sending anything.
+            decision = resolve_template_send(caption)
             wamid = whatsapp.send_text_template(
-                phone, [title, company, event, body, url]
+                phone, decision["params"], template_name=decision["template_name"]
             )
             bot_db.mark_batch_template_sent(phone)
             bot_db.mark_filing_sent(phone, file_key)
@@ -1040,7 +1076,10 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
             if wamid:
                 bot_db.store_wamid(wamid, phone, file_key, file_path, caption,
                                    filing_id=filing_id, channel="template")
-            whatsapp._safe_print(f"[OK] Sent text template to {phone} for {file_key}")
+            if decision["route"] in ("result_count", "result_legacy"):
+                whatsapp._safe_print(f"[OK] Sent RESULT template to {phone} for {file_key}")
+            else:
+                whatsapp._safe_print(f"[OK] Sent text template to {phone} for {file_key}")
             return True
         except WhatsAppError as e:
             print(f"❌ Template send failed for {phone} ({file_key}): {e}")
