@@ -358,7 +358,23 @@ def _format_exchange_time(raw) -> str:
 #           runs; the true change was +14.59%);
 #         • abbreviations that contradict the metric name corrected, so a
 #           "Profit before tax" block can no longer be labelled PAT.
-SUMMARY_FORMAT_VERSION = 5
+#   6 = looks_like_financial_results() now also recognises the dated 4-column
+#       results layout ("30.06.2026 31.03.2026 30.06.2025 ... (Unaudited)
+#       (Audited)") used by "newspaper advertisement of results" filings,
+#       which carry no results PHRASE at all. A v5 cache for one of these
+#       holds a generic Stock Bits notice summary where a Result Bits metrics
+#       table should be — re-classifying on re-cache, not just re-labelling.
+#   7 = company-identity guard (output.py). A "newspaper advertisement"
+#       filing can be a scan of a full newspaper PAGE carrying several
+#       companies' notices — v6's wider results detection made it possible to
+#       lock onto a NEIGHBOURING company's results table on the same page.
+#       Seen in production: a filing under ULTRACEMCO whose extracted metrics
+#       were actually CG Power and Industrial Solutions'. process_pdf now
+#       discards a results block whose extracted company name doesn't match
+#       the exchange's own record for the filing. A v6 cache built before
+#       this guard existed may hold another company's numbers under our
+#       subscriber's company name — must be regenerated, not re-sent.
+SUMMARY_FORMAT_VERSION = 7
 
 
 

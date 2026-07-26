@@ -560,6 +560,15 @@ _RESULT_PHRASES = (
     "audited financial", "unaudited financial",
 )
 
+# "Newspaper advertisement of results" filings carry the standard 4-column
+# results layout (this quarter / prior quarter / year-ago quarter / full year)
+# as bare DATE headers instead of a "quarter ended" PHRASE — 3+ dd.mm.yyyy
+# dates in a row next to "(Unaudited)"/"(Audited)" markers is the layout
+# signature. Missing this sent a genuine UltraTech Cement results filing out
+# as a generic notice because none of _RESULT_PHRASES appeared verbatim.
+_DATE_COLUMNS_RE = re.compile(r"(?:\d{2}\.\d{2}\.\d{4}\s*){3,}")
+_AUDIT_MARKER_RE = re.compile(r"\(\s*(?:un)?audited\s*\)", re.IGNORECASE)
+
 _METRIC_KEYWORDS = (
     "revenue", "total income", "total revenue", "profit before tax",
     "profit after tax", "net profit", "ebitda", "operating profit",
@@ -578,17 +587,22 @@ def looks_like_financial_results(pdf_text: str) -> bool:
     Most exchange filings — board-meeting notices, trading-window closures,
     Reg 30 disclosures, newspaper ads, presentations without a results table —
     are NOT results statements and have no financial table. Running metric
-    extraction on them just makes the model invent numbers. We require a results
-    phrase, at least two distinct metric terms, AND a table's worth of monetary
-    figures (which a mere notice/intimation will not have).
+    extraction on them just makes the model invent numbers. We require
+    (a results phrase OR a dated 4-column results layout), at least two
+    distinct metric terms, AND a table's worth of monetary figures (which a
+    mere notice/intimation will not have).
     """
     if not pdf_text:
         return False
     low = pdf_text.lower()
     has_phrase   = any(p in low for p in _RESULT_PHRASES)
+    has_dated_columns = (
+        bool(_DATE_COLUMNS_RE.search(pdf_text))
+        and len(_AUDIT_MARKER_RE.findall(pdf_text)) >= 2
+    )
     keyword_hits = sum(1 for k in _METRIC_KEYWORDS if k in low)
     money_count  = len(_MONEY_RE.findall(pdf_text))
-    return has_phrase and keyword_hits >= 2 and money_count >= 12
+    return (has_phrase or has_dated_columns) and keyword_hits >= 2 and money_count >= 12
 
 
 def verify_metrics_against_text(summary: "FinancialSummary", pdf_text: str) -> int:
@@ -869,6 +883,46 @@ def drop_implausible_metrics(summary: "FinancialSummary") -> int:
     return len(kept)
 
 
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(limited|ltd\.?|private|pvt\.?|inc\.?|plc|corporation|corp\.?)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_company_name(name: str) -> str:
+    name = _LEGAL_SUFFIX_RE.sub(" ", name or "")
+    name = re.sub(r"[^a-z0-9 ]", " ", name.lower())
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _names_plausibly_match(hint: str, extracted: str) -> bool:
+    """
+    Loose sanity check that `extracted` (the LLM's own read of the company
+    name off the PDF) is plausibly the SAME company as `hint` (the exchange's
+    own record for this filing/symbol — authoritative, not LLM-derived).
+
+    Exists to catch page-bleed: a "newspaper advertisement" filing can be a
+    scan of a full newspaper PAGE carrying several companies' notices side by
+    side. Widening looks_like_financial_results() to catch these (the dated
+    4-column layout) means the extractor can now lock onto a NEIGHBOURING
+    company's results table on the same page — real numbers, correctly
+    verified against the source text, attached to the wrong company. Seen in
+    production: a filing under symbol ULTRACEMCO whose extracted metrics were
+    actually CG Power and Industrial Solutions', a different company whose
+    ad shared the same scanned page.
+
+    One shared significant word is enough to pass — this only needs to catch
+    a clean mismatch (a different company name entirely), not police naming
+    variants precisely.
+    """
+    h, e = _normalize_company_name(hint), _normalize_company_name(extracted)
+    if not h or not e:
+        return True  # nothing to compare against — don't block on missing data
+    h_words = {w for w in h.split() if len(w) > 3}
+    e_words = {w for w in e.split() if len(w) > 3}
+    return bool(h_words & e_words)
+
+
 def process_pdf(
     pdf_source: str,
     provider: str = "google",
@@ -918,8 +972,24 @@ def process_pdf(
               f"{provider} / {_model_name} ...", file=sys.stderr)
         try:
             summary = extract_financials(pdf_text, provider=provider, model=model)
-            # Prefer the extracted name; fall back to the caller's known company.
-            company = summary.company_name or company_hint or "Unknown Company"
+            extracted_name = summary.company_name or ""
+            if (company_hint and extracted_name
+                    and not _names_plausibly_match(company_hint, extracted_name)):
+                # The metrics almost certainly belong to a DIFFERENT company
+                # sharing this scanned page — see _names_plausibly_match.
+                # Discard them entirely rather than risk shipping a real
+                # profit figure under the wrong public company's name.
+                print(f"      Extracted company '{extracted_name}' does not match "
+                      f"expected '{company_hint}' — likely a different company's "
+                      f"table on a shared newspaper page; discarding metrics.",
+                      file=sys.stderr)
+                summary = None
+                raise ValueError("company identity mismatch")
+            # company_hint is the exchange's OWN record for this filing/symbol
+            # (ground truth) — always prefer it over the LLM's own reading of
+            # the name off the page, which the identity check above doesn't
+            # otherwise use.
+            company = company_hint or extracted_name or "Unknown Company"
             summary.company_name = company
             # Defence in depth, in THIS order — each step depends on the last:
             #  1. verify: drop metrics whose digits aren't in the PDF at all.

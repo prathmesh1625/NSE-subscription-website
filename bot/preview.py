@@ -17,6 +17,7 @@
 # ============================================================
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 
@@ -231,25 +232,43 @@ def main():
         description="Preview the WhatsApp message(s) a PDF would generate, "
                      "without sending anything or touching the database."
     )
-    ap.add_argument("--pdf", required=True, help="Local path to a filing PDF")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--pdf", help="Local path to a filing PDF")
+    src.add_argument("--url", help="URL of a filing PDF (e.g. an nseindia.com link)")
     ap.add_argument("--provider", default=None)
     ap.add_argument("--model", default=None)
     ap.add_argument("--company", default=None)
     ap.add_argument("--symbol", default="N/A")
     ap.add_argument("--filing-type", default="Investor Filing")
-    ap.add_argument("--download-url", default="https://equityalerts.in/sample-filing.pdf")
+    ap.add_argument("--download-url", default=None,
+                    help="Link shown in the message's download line "
+                         "(defaults to --url itself, when given)")
     ap.add_argument("--json", action="store_true", help="Print raw JSON instead of a formatted report")
     args = ap.parse_args()
 
-    report = preview_pdf(
-        args.pdf,
-        provider=args.provider,
-        model=args.model,
-        company=args.company,
-        symbol=args.symbol,
-        filing_type=args.filing_type,
-        download_url=args.download_url,
-    )
+    tmp_path = None
+    pdf_path = args.pdf
+    if args.url:
+        print(f"Downloading {args.url} ...", file=sys.stderr)
+        tmp_path = output.download_pdf(args.url)
+        pdf_path = tmp_path
+
+    try:
+        report = preview_pdf(
+            pdf_path,
+            provider=args.provider,
+            model=args.model,
+            company=args.company,
+            symbol=args.symbol,
+            filing_type=args.filing_type,
+            download_url=args.download_url or args.url or "https://equityalerts.in/sample-filing.pdf",
+        )
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if args.url:
+        report["pdf_path"] = args.url
 
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
