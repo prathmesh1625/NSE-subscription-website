@@ -21,10 +21,19 @@ RUN npm run build
 FROM python:3.10-slim
 WORKDIR /app
 
-# Install system dependencies for psycopg2 and database setups
+# Install system dependencies for psycopg2 and database setups.
+#
+# tesseract-ocr is the OCR engine output.py falls back to for scanned filings
+# and newspaper cuttings (pytesseract is only a wrapper — it needs this binary,
+# and without it OCR logs a warning once and stays disabled). The -hin language
+# data is here so OCR_LANGS=eng+hin is a config change rather than a rebuild:
+# results are published in Hindi papers as well as English ones.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-hin \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy python requirements

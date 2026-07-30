@@ -401,7 +401,12 @@ def _format_exchange_time(raw) -> str:
 #         • _names_plausibly_match() no longer discards every metric when the
 #           exchange's record for the filing is the bare SYMBOL ("TATAPOWER"
 #           shares no word with "The Tata Power Company Limited").
-SUMMARY_FORMAT_VERSION = 9
+#  10 = OCR (output.py). Scanned filings and newspaper cuttings now have their
+#       image-only and mojibake pages read by tesseract, so a v9 cache for one
+#       of those holds a summary written from the covering letter alone — or the
+#       "no summary available" notice — where the published results table is now
+#       readable. Re-extracting, not re-formatting.
+SUMMARY_FORMAT_VERSION = 10
 
 
 

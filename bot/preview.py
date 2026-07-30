@@ -40,8 +40,9 @@ def _extract_once(pdf_path: str) -> tuple:
     preview that stopped at "<100 chars" would claim a filing is dropped
     that production happily summarises, which defeats the point of the tool.
     """
+    report = {}
     try:
-        text = output.extract_text_from_pdf_file(pdf_path)
+        text = output.extract_text_from_pdf_file(pdf_path, report=report)
     except Exception as e:
         return "", {
             "chars": 0,
@@ -51,19 +52,29 @@ def _extract_once(pdf_path: str) -> tuple:
                     "this is NOT the same as a scanned PDF.",
         }
     chars = len(text.strip())
-    report = {
+    report.update({
         "chars": chars,
         # Production only bails when there is NO text whatsoever.
         "production_drops": chars == 0,
         "sample": text.strip()[:300],
-    }
+    })
     if chars == 0:
-        report["note"] = ("No text layer at all — scanned PDF or newspaper "
-                          "cutting. output.process_pdf raises here.")
+        report["note"] = ("No text layer AND no OCR output — an image-only PDF "
+                          "with OCR disabled or unavailable (is the "
+                          "tesseract-ocr binary installed?). "
+                          "output.process_pdf raises here.")
     elif chars < 100:
         report["note"] = (f"Only {chars} chars of text — likely a scanned page "
                           "with a thin text layer. Production does NOT drop "
                           "this; it sends whatever the LLM makes of it.")
+    elif report.get("ocr_pages"):
+        report["note"] = (f"OCR supplied page(s) {report['ocr_pages']} "
+                          f"({report['ocr_chars']:,} chars) — the numbers below "
+                          f"come from glyph recognition, so spot-check them "
+                          f"against the filing.")
+    elif report.get("garbled_pages"):
+        report["note"] = (f"Page(s) {report['garbled_pages']} have a broken text "
+                          f"layer and were NOT recovered by OCR.")
     return text, report
 
 
@@ -216,7 +227,10 @@ def _print_report(report: dict):
     print(sep)
 
     ext = report["extraction"]
-    print(f"\n[Text extraction] {ext['chars']} chars")
+    print(f"\n[Text extraction] {ext['chars']} chars"
+          + (f" — {ext['usable_pages']}/{ext['pages']} pages had a usable text "
+             f"layer, {len(ext.get('ocr_pages') or [])} OCR'd"
+             if "pages" in ext else ""))
     if ext.get("note"):
         print(f"    {ext['note']}")
 

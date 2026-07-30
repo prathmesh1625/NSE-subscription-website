@@ -62,8 +62,13 @@ BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 
 # of a 46-page filing) and, if that fails or finds nothing, the plain content
 # summary (25s). At the old 35s the extraction alone consumed the whole budget
 # on every large results PDF, so the fallback summary never ran and the filing
-# went out with an EMPTY body. 45 + 25 = 70 has to FIT, hence 90.
-SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 90))
+# went out with an EMPTY body.
+#
+# A SCANNED filing adds OCR ahead of both (output.OCR_TIME_BUDGET_SEC, 25s), so
+# the worst case is 25 + 45 + 25 = 95 and this has to clear it. Only the scanned
+# minority pays that: OCR is skipped whenever the embedded text layer already
+# yields a results table, which is the common case.
+SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 120))
 
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.

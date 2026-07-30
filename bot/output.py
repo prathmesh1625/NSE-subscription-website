@@ -76,34 +76,241 @@ class FinancialSummary(BaseModel):
 # 2.  PDF text extraction helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_text_from_pdf_file(pdf_path: str) -> str:
-    """Extract all text from a PDF file using pypdf for speed, with a fallback to pdfplumber."""
-    # Try pypdf first (extremely fast and doesn't get stuck on vector diagrams)
+def _extract_pages_pypdf(pdf_path: str) -> list | None:
+    """Per-page text via pypdf (fast, doesn't stall on vector diagrams), or None."""
     try:
         import pypdf
         reader = pypdf.PdfReader(pdf_path)
-        text_parts = []
-        for page in reader.pages:
-            t = page.extract_text()
-            if t:
-                text_parts.append(t)
-        full_text = "\n".join(text_parts)
-        if len(full_text.strip()) > 100:
-            print("⚡ Extracted text using fast pypdf parser.", file=sys.stderr)
-            return full_text
+        return [(page.extract_text() or "") for page in reader.pages]
     except Exception as e:
-        print(f"⚠️ pypdf extraction failed: {e}. Falling back to pdfplumber...", file=sys.stderr)
+        print(f"⚠️ pypdf extraction failed: {e}. Falling back to pdfplumber...",
+              file=sys.stderr)
+        return None
 
-    # Fallback to pdfplumber without the slow extract_tables() layout geometry analysis
+
+def _extract_pages_pdfplumber(pdf_path: str) -> list:
+    """Per-page text via pdfplumber, skipping the slow extract_tables() geometry."""
     print("⏳ Running pdfplumber fallback text extraction...", file=sys.stderr)
-    text_parts = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text_parts.append(page_text)
+        return [(page.extract_text() or "") for page in pdf.pages]
 
-    return "\n".join(text_parts)
+
+# ── OCR fallback for scanned filings and newspaper cuttings ──────────────────
+# A "newspaper advertisement of results" filing is a covering letter plus a
+# SCAN of the printed page, and an "Outcome of board meeting" is often a scan of
+# the signed statement. Their pages carry either no text layer at all or a
+# broken one that decodes to mojibake ("U3 a;Sjd Qp Q)IQ"), so the summary had
+# nothing to work with and the filing went out with no figures — and, when the
+# whole document was image-only, process_pdf raised and nothing was generated at
+# all. OCR only those pages, and only when the text we already have can't yield
+# a results table, so a normal text-layer filing pays nothing for this.
+
+OCR_ENABLED = os.getenv("OCR_ENABLED", "true").strip().lower() not in ("false", "0", "no")
+OCR_DPI     = int(os.getenv("OCR_DPI", "300"))          # 300 is tesseract's sweet spot for print
+OCR_LANGS   = os.getenv("OCR_LANGS", "eng")             # e.g. "eng+hin" for Hindi editions
+# Newspaper intimations run 1-4 pages; a fully scanned results statement more.
+OCR_MAX_PAGES       = int(os.getenv("OCR_MAX_PAGES", "10"))
+# Wall-clock ceiling for ALL OCR of one document. This runs INSIDE
+# config.SUMMARY_TIMEOUT_SEC together with the two LLM calls, so it must leave
+# room for them — see the budget note on SUMMARY_TIMEOUT_SEC in config.py.
+OCR_TIME_BUDGET_SEC = int(os.getenv("OCR_TIME_BUDGET_SEC", "25"))
+
+# A page with less real text than this contributes nothing and is a scan.
+_MIN_PAGE_CHARS = 40
+# Below this much usable text in the WHOLE document, treat it as scanned.
+_MIN_USABLE_CHARS = 600
+
+_WORD_RE  = re.compile(r"[A-Za-z]{2,}")
+_VOWEL_RE = re.compile(r"[aeiouyAEIOUY]")
+# Thresholds calibrated on 109 real filing pages: the one page with a broken
+# font encoding scored 0.38 on the vowel ratio and 0.112 on control characters,
+# while all 108 legitimate pages scored >= 0.75 and EXACTLY 0.0 respectively.
+_GARBLE_MIN_TOKENS   = 20      # fewer than this and the ratio isn't meaningful
+_GARBLE_VOWEL_RATIO  = 0.60
+_GARBLE_CTRL_RATIO   = 0.01
+
+_ocr_unavailable = False       # set once, so a missing tesseract isn't retried
+
+
+def text_looks_garbled(text: str) -> bool:
+    """
+    True when a page HAS text but it decoded to mojibake — a PDF whose embedded
+    font carries a broken encoding, which is how scanned newspaper cuttings
+    reach us. Such text is worse than no text: it passes every "is there text?"
+    check and then poisons the summary.
+
+    Two independent signals, either is enough:
+      • C0 control characters in the body (a real text layer has none);
+      • too few alphabetic tokens containing a vowel (real English words
+        essentially all do).
+    """
+    if not text:
+        return False
+    ctrl = sum(1 for c in text if ord(c) < 32 and c not in "\t\n\r")
+    if ctrl / len(text) > _GARBLE_CTRL_RATIO:
+        return True
+    tokens = _WORD_RE.findall(text)
+    if len(tokens) < _GARBLE_MIN_TOKENS:
+        return False               # too little to judge — not garbled, just thin
+    voweled = sum(1 for w in tokens if _VOWEL_RE.search(w))
+    return (voweled / len(tokens)) < _GARBLE_VOWEL_RATIO
+
+
+def page_text_is_usable(text: str) -> bool:
+    """True when a page's extracted text is worth feeding to the model."""
+    return len((text or "").strip()) >= _MIN_PAGE_CHARS and not text_looks_garbled(text)
+
+
+def _ocr_pages(pdf_path: str, page_indexes: list,
+               require_image: bool = True) -> dict:
+    """
+    OCR the given 0-based page indexes and return {index: text}.
+
+    Renders with PyMuPDF and reads with tesseract. Any missing dependency (no
+    PyMuPDF wheel, no tesseract binary in the image) is logged ONCE and degrades
+    to "no OCR" — never an exception, because this sits in the delivery path.
+
+    With `require_image`, pages carrying no embedded image are skipped: a blank
+    signature page has nothing to read and would only burn the time budget.
+    Callers pass require_image=False when NO page yielded usable text, so a scan
+    drawn as vectors rather than an image still gets rasterised and read.
+    """
+    global _ocr_unavailable
+    if _ocr_unavailable or not page_indexes:
+        return {}
+    try:
+        try:
+            import pymupdf                      # PyMuPDF >= 1.24
+        except ImportError:
+            import fitz as pymupdf              # older name
+        import pytesseract
+        from PIL import Image
+    except Exception as e:
+        _ocr_unavailable = True
+        print(f"⚠️ OCR unavailable ({e}) — scanned pages will be skipped. "
+              f"Install pymupdf + pytesseract and the tesseract-ocr binary.",
+              file=sys.stderr)
+        return {}
+
+    import io
+    import time as _time
+
+    out      = {}
+    started  = _time.monotonic()
+    doc      = None
+    try:
+        doc = pymupdf.open(pdf_path)
+        for idx in page_indexes[:OCR_MAX_PAGES]:
+            elapsed = _time.monotonic() - started
+            if elapsed > OCR_TIME_BUDGET_SEC:
+                print(f"⏱️  OCR budget ({OCR_TIME_BUDGET_SEC}s) reached after "
+                      f"{len(out)} page(s); skipping the rest.", file=sys.stderr)
+                break
+            try:
+                page = doc[idx]
+                if require_image and not page.get_images():
+                    continue                    # nothing scanned on this page
+                pix = page.get_pixmap(dpi=OCR_DPI)
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                txt = pytesseract.image_to_string(img, lang=OCR_LANGS) or ""
+                if txt.strip():
+                    out[idx] = txt
+            except pytesseract.TesseractNotFoundError:
+                _ocr_unavailable = True
+                print("⚠️ tesseract binary not found — install the "
+                      "tesseract-ocr package in the image.", file=sys.stderr)
+                break
+            except Exception as e:
+                print(f"⚠️ OCR failed on page {idx + 1}: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"⚠️ OCR could not open {os.path.basename(pdf_path)}: {e}",
+              file=sys.stderr)
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+    if out:
+        print(f"🔍 OCR recovered {sum(len(t) for t in out.values()):,} chars from "
+              f"{len(out)} scanned page(s) at {OCR_DPI} DPI ({OCR_LANGS}).",
+              file=sys.stderr)
+    return out
+
+
+def extract_text_from_pdf_file(pdf_path: str, report: dict | None = None) -> str:
+    """
+    All text from a PDF: the embedded text layer, with OCR filling in pages that
+    have none or whose layer decoded to mojibake.
+
+    Pass `report` to receive extraction diagnostics (page counts, which pages
+    were OCR'd and why) without parsing stderr — bot/preview.py uses this.
+    """
+    pages = _extract_pages_pypdf(pdf_path)
+    if pages is None:
+        pages = _extract_pages_pdfplumber(pdf_path)
+    elif len("".join(pages).strip()) <= 100:
+        # pypdf found next to nothing — pdfplumber sometimes does better on the
+        # same file, so try it before paying for OCR.
+        try:
+            plumbed = _extract_pages_pdfplumber(pdf_path)
+            if len("".join(plumbed).strip()) > len("".join(pages).strip()):
+                pages = plumbed
+        except Exception as e:
+            print(f"⚠️ pdfplumber extraction failed: {e}", file=sys.stderr)
+    else:
+        print("⚡ Extracted text using fast pypdf parser.", file=sys.stderr)
+
+    usable       = [t for t in pages if page_text_is_usable(t)]
+    usable_text  = "\n".join(usable)
+    bad_indexes  = [i for i, t in enumerate(pages) if not page_text_is_usable(t)]
+    garbled_seen = any(text_looks_garbled(t) for t in pages)
+
+    if report is not None:
+        report.update({
+            "pages": len(pages),
+            "usable_pages": len(usable),
+            "garbled_pages": [i + 1 for i, t in enumerate(pages)
+                              if text_looks_garbled(t)],
+            "text_layer_chars": len(usable_text.strip()),
+            "ocr_pages": [],
+            "ocr_chars": 0,
+        })
+
+    # Only pay for OCR when the text layer can't already do the job: a broken
+    # layer, almost no text at all, or no results table in what we have. A
+    # normal filing whose statement extracted cleanly skips this entirely.
+    needs_ocr = bad_indexes and OCR_ENABLED and (
+        garbled_seen
+        or len(usable_text.strip()) < _MIN_USABLE_CHARS
+        or not looks_like_financial_results(usable_text)
+    )
+    if not needs_ocr:
+        return usable_text if usable else "\n".join(pages)
+
+    ocr_text = _ocr_pages(pdf_path, bad_indexes, require_image=bool(usable))
+    if report is not None:
+        report["ocr_pages"] = [i + 1 for i in sorted(ocr_text)]
+        report["ocr_chars"] = sum(len(t) for t in ocr_text.values())
+
+    # Rebuild in page order: OCR replaces an unusable page, a usable text layer
+    # always wins over OCR (it is exact, where OCR guesses glyphs).
+    merged = []
+    for i, t in enumerate(pages):
+        if page_text_is_usable(t):
+            merged.append(t)
+        elif i in ocr_text:
+            merged.append(ocr_text[i])
+    if not merged:
+        # Image-only document and OCR produced nothing. Returning "" (rather
+        # than the mojibake) makes process_pdf raise, so db_watcher sends the
+        # degraded alert that names the filing and links to it — better than a
+        # summary written from garbage.
+        print(f"⚠️ No usable text in {os.path.basename(pdf_path)} "
+              f"({len(pages)} page(s)) and OCR recovered nothing.",
+              file=sys.stderr)
+    return "\n".join(merged)
 
 
 def download_pdf(url: str) -> str:

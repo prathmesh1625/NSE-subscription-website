@@ -9,4 +9,9 @@ langchain-anthropic
 langchain-core
 pdfplumber
 pypdf
+# OCR fallback for scanned filings / newspaper cuttings (output.py). pymupdf
+# rasterises the page, pytesseract reads it — the latter also needs the
+# tesseract-ocr system package, installed in the Dockerfile.
+pymupdf
+pytesseract
 python-dotenv
