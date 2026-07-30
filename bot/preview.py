@@ -68,22 +68,38 @@ def _extract_once(pdf_path: str) -> tuple:
 
 
 def _results_detection_report(text: str) -> dict:
+    """
+    Why looks_like_financial_results() said yes or no — every signal it
+    actually uses, including the dated-column layout that a
+    newspaper-advertisement filing is recognised by (this report used to omit
+    it, so it explained a detected filing as having no result phrase).
+    """
     low = text.lower()
     has_phrase   = any(p in low for p in output._RESULT_PHRASES)
+    has_dated_columns = (
+        bool(output._DATE_COLUMNS_RE.search(text))
+        and len(output._AUDIT_MARKER_RE.findall(text)) >= 2
+    )
     keyword_hits = [k for k in output._METRIC_KEYWORDS if k in low]
+    abbrev_hits  = sorted(set(output._METRIC_ABBREV_RE.findall(text)))
+    term_count   = output.count_metric_terms(text)
     money_count  = len(output._MONEY_RE.findall(text))
     detected     = output.looks_like_financial_results(text)
     return {
         "detected_as_results": detected,
         "has_result_phrase": has_phrase,
+        "has_dated_columns": has_dated_columns,
         "metric_keywords_found": keyword_hits,
+        "metric_abbreviations_found": abbrev_hits,
         "money_figures_found": money_count,
+        "document_scale": output.detect_document_scale(text),
         "reason": (
             "looks like a results document"
             if detected else
-            f"needs a result phrase AND >=2 metric keywords AND >=12 money "
-            f"figures — got phrase={has_phrase}, "
-            f"keywords={len(keyword_hits)}, money={money_count}"
+            f"needs (a result phrase OR dated result columns) AND >=2 metric "
+            f"terms AND >=12 money figures — got phrase={has_phrase}, "
+            f"dated_columns={has_dated_columns}, terms={term_count}, "
+            f"money={money_count}"
         ),
     }
 

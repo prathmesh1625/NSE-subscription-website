@@ -56,7 +56,14 @@ BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 
 # a slow/hung LLM call can never push delivery past the "within a minute" goal —
 # on timeout we send the PDF with the basic caption (company + exchange time +
 # title) instead. Cost is not a concern, so this is generous.
-SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 35))
+#
+# A RESULTS filing needs TWO calls to fit inside this one cap: the metrics
+# extraction (output.RESULT_EXTRACT_TIMEOUT_SEC, 45s — it sends up to 80k chars
+# of a 46-page filing) and, if that fails or finds nothing, the plain content
+# summary (25s). At the old 35s the extraction alone consumed the whole budget
+# on every large results PDF, so the fallback summary never ran and the filing
+# went out with an EMPTY body. 45 + 25 = 70 has to FIT, hence 90.
+SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 90))
 
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.

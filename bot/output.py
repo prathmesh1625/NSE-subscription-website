@@ -166,6 +166,18 @@ Your task:
    rule 5, matching what the source table states.
 7. Format percentage values with % suffix.
 
+8. SCANNED / OCR'd FILINGS — the column headers may not line up with the numbers.
+   Many exchange filings are scans. In their extracted text the period headers
+   ("30.06.2026 31.03.2026 30.06.2025") are often in a DIFFERENT order from the
+   numeric columns they label, the audited/unaudited markers are shuffled with
+   them, and every row NAME can appear as one block ABOVE all the numbers.
+   Before you attach a period label to a value, cross-check it against any
+   press release, "Financial Performance" or highlights section in the SAME
+   document — those state the current quarter's figures in words (e.g. "Net
+   Sales at Rs 10,521.4 crore (+17.9%)") and are the reliable anchor for which
+   column is the current quarter. If you cannot establish with confidence which
+   period a number belongs to, OMIT that metric rather than guess.
+
 CRITICAL ANTI-HALLUCINATION RULES (read carefully):
 - Return an EMPTY "metrics" array UNLESS the document is an actual quarterly or
   annual FINANCIAL RESULTS statement that contains a real results table with
@@ -191,6 +203,19 @@ EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
         "PDF TEXT:\n{pdf_text}"
     )),
 ])
+
+
+# Seconds allowed for the RESULTS extraction call (build_chain, below). It is
+# by far the heaviest LLM call in the bot — a 46-page results filing sends up to
+# 80k chars plus the JSON schema, where summarize_content sends 8k — so it needs
+# its own, longer budget than the 25s the plain summary uses.
+#
+# Retries are OFF for it on purpose. db_watcher.generate_pdf_summary caps the
+# WHOLE summary at config.SUMMARY_TIMEOUT_SEC, and process_pdf falls back to
+# summarize_content when extraction fails; a retry of a call this size just
+# burns the rest of that budget, so the fallback never got to run and the
+# filing went out with an EMPTY body. Extraction must fail FAST and leave room.
+RESULT_EXTRACT_TIMEOUT_SEC = int(os.getenv("RESULT_EXTRACT_TIMEOUT_SEC", "45"))
 
 
 # ── Provider → default model mapping ─────────────────────────────────────────
@@ -231,7 +256,7 @@ def build_chain(provider: str = "google", model: str | None = None):
     elif provider == "openai":
         from langchain_openai import ChatOpenAI
         llm = ChatOpenAI(model=_model, temperature=0, max_tokens=2048,
-                         timeout=25, max_retries=1)
+                         timeout=RESULT_EXTRACT_TIMEOUT_SEC, max_retries=0)
 
     elif provider == "groq":
         from langchain_groq import ChatGroq
@@ -569,14 +594,41 @@ _RESULT_PHRASES = (
 _DATE_COLUMNS_RE = re.compile(r"(?:\d{2}\.\d{2}\.\d{4}\s*){3,}")
 _AUDIT_MARKER_RE = re.compile(r"\(\s*(?:un)?audited\s*\)", re.IGNORECASE)
 
+# P&L line-item names, as an INVESTOR PRESENTATION or a press release writes
+# them — not just as the statutory results statement does. A deck reports
+# "Net Sales", "Gross Contribution" and "PBDIT" where the filed statement says
+# "Revenue from operations" and "Profit before tax": Asian Paints' Q1FY27
+# investor presentation carried Net Sales / PBDIT / PBT / PAT for two periods
+# and matched exactly ONE term ("revenue") of the original list, so it failed
+# the >=2 gate and went out as a generic notice with no figures at all.
 _METRIC_KEYWORDS = (
     "revenue", "total income", "total revenue", "profit before tax",
     "profit after tax", "net profit", "ebitda", "operating profit",
     "earnings per share", "total expenses", "total comprehensive income",
+    "net sales", "income from operations", "profit for the period",
+    "gross contribution", "gross margin", "operating margin",
+)
+
+# The same line items as the ABBREVIATIONS a deck labels its bar charts with.
+# Matched case-SENSITIVELY and whole-word: these are always printed uppercase,
+# and a case-insensitive "pat"/"eps" would fire on ordinary prose ("patent",
+# "pattern") and hand a board-meeting notice to the metric extractor.
+_METRIC_ABBREV_RE = re.compile(
+    r"\b(?:PAT|PBT|PBDIT|PBILDT|EBITDA|EBIT|OPM|EPS)\b"
 )
 
 # Monetary-looking figures: "1,234.56", "12,34,567" (Indian grouping) or "934.17".
 _MONEY_RE = re.compile(r"\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d+\.\d{2}")
+
+
+def count_metric_terms(pdf_text: str) -> int:
+    """
+    How many DISTINCT P&L line items the text names, counting both the spelled
+    out form and the uppercase abbreviation a presentation uses for it.
+    """
+    low = (pdf_text or "").lower()
+    hits = sum(1 for k in _METRIC_KEYWORDS if k in low)
+    return hits + len(set(_METRIC_ABBREV_RE.findall(pdf_text or "")))
 
 
 def looks_like_financial_results(pdf_text: str) -> bool:
@@ -591,6 +643,10 @@ def looks_like_financial_results(pdf_text: str) -> bool:
     (a results phrase OR a dated 4-column results layout), at least two
     distinct metric terms, AND a table's worth of monetary figures (which a
     mere notice/intimation will not have).
+
+    The monetary-figure floor is what keeps the widened metric vocabulary safe:
+    a newspaper-publication INTIMATION names the results in its subject line
+    but carries no table, so it still cannot reach 12 figures.
     """
     if not pdf_text:
         return False
@@ -600,7 +656,7 @@ def looks_like_financial_results(pdf_text: str) -> bool:
         bool(_DATE_COLUMNS_RE.search(pdf_text))
         and len(_AUDIT_MARKER_RE.findall(pdf_text)) >= 2
     )
-    keyword_hits = sum(1 for k in _METRIC_KEYWORDS if k in low)
+    keyword_hits = count_metric_terms(pdf_text)
     money_count  = len(_MONEY_RE.findall(pdf_text))
     return (has_phrase or has_dated_columns) and keyword_hits >= 2 and money_count >= 12
 
@@ -667,16 +723,30 @@ _SCALE_TO_CRORE = {"lakh": 0.01, "crore": 1.0, "million": 0.1, "billion": 100.0}
 # "(Rs. in Crore)", "(₹ in Millions)", "Amount in Lakhs", ... We deliberately
 # require the "in <unit>" phrasing — a bare "Cr" appears all over a document as
 # a value suffix and would make detection meaningless.
+#
+# The trailing [a-z]{0,2} on `long` absorbs OCR noise on the unit itself. A
+# scanned filing's "(₹ in Crores)" reaches us as "(f in Crorea)" — the currency
+# glyph is already optional here, but the mangled final letter made the whole
+# heading invisible, so detect_document_scale() returned None and every figure
+# went out with no denomination at all ("🗓️ Jun 2026: 10,521.44").
+#
+# `short` covers the abbreviated heading an investor DECK uses ("Note: Figures
+# in columns in ₹ cr"), where the currency symbol sits between "in" and the
+# unit. It gets no OCR tolerance: "cr" plus two free letters would also match
+# "in crop", and the whole point of requiring "in " is that a bare "Cr" is
+# meaningless as a signal.
 _DOC_SCALE_RE = re.compile(
     r"(?:rs\.?|inr|₹|amount|figures)?\s*(?:are\s+)?in\s+"
-    r"(lakhs?|lacs?|crores?|millions?|billions?)\b",
+    r"(?:(?:rs\.?|inr|₹)\s*)?"
+    r"(?:(?P<long>lakhs?|lacs?|crores?|millions?|billions?)[a-z]{0,2}"
+    r"|(?P<short>crs?|mns?|bns?))\b",
     re.IGNORECASE,
 )
 _SCALE_ALIASES = {
     "lakh": "lakh", "lakhs": "lakh", "lac": "lakh", "lacs": "lakh",
-    "crore": "crore", "crores": "crore",
-    "million": "million", "millions": "million",
-    "billion": "billion", "billions": "billion",
+    "crore": "crore", "crores": "crore", "cr": "crore", "crs": "crore",
+    "million": "million", "millions": "million", "mn": "million", "mns": "million",
+    "billion": "billion", "billions": "billion", "bn": "billion", "bns": "billion",
 }
 
 
@@ -702,7 +772,8 @@ def detect_document_scale(pdf_text: str) -> str | None:
         return None
     matches = []
     for m in _DOC_SCALE_RE.finditer(pdf_text):
-        scale = _SCALE_ALIASES.get(m.group(1).lower())
+        unit  = m.group("long") or m.group("short") or ""
+        scale = _SCALE_ALIASES.get(unit.lower())
         if scale:
             matches.append((m.start(), scale))
     if not matches:
@@ -712,6 +783,7 @@ def detect_document_scale(pdf_text: str) -> str | None:
     # directly above the table it applies to.
     low    = pdf_text.lower()
     anchors = [low.find(k) for k in _METRIC_KEYWORDS if k in low]
+    anchors += [m.start() for m in _METRIC_ABBREV_RE.finditer(pdf_text)]
     if anchors:
         anchor = min(anchors)
         return min(matches, key=lambda sm: abs(sm[0] - anchor))[1]
@@ -1105,13 +1177,29 @@ def _names_plausibly_match(hint: str, extracted: str) -> bool:
     One shared significant word is enough to pass — this only needs to catch
     a clean mismatch (a different company name entirely), not police naming
     variants precisely.
+
+    An NSE SYMBOL counts as a match for the name it is an abbreviation of. The
+    hint is the exchange's record for the filing, which is the bare symbol
+    whenever the company isn't in config.COMPANY_LIST and the portal name
+    lookup misses or errors — and a symbol is one squashed token, so word
+    intersection could never match it: "TATAPOWER" vs "The Tata Power Company
+    Limited" shares no WORD with the name it abbreviates, and every metric of a
+    correctly-extracted Tata Power results filing was being discarded as
+    another company's. Comparing the space-stripped forms catches those
+    (tatapower ⊂ thetatapowercompany) while still rejecting a genuinely
+    different company (cgpowerandindustrialsolutions vs ultracemco).
     """
     h, e = _normalize_company_name(hint), _normalize_company_name(extracted)
     if not h or not e:
         return True  # nothing to compare against — don't block on missing data
     h_words = {w for w in h.split() if len(w) > 3}
     e_words = {w for w in e.split() if len(w) > 3}
-    return bool(h_words & e_words)
+    if h_words & e_words:
+        return True
+    h_squashed, e_squashed = h.replace(" ", ""), e.replace(" ", "")
+    if len(h_squashed) < 4 or len(e_squashed) < 4:
+        return True                     # too short to judge — don't block
+    return h_squashed in e_squashed or e_squashed in h_squashed
 
 
 def process_pdf(

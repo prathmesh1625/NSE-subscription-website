@@ -386,7 +386,22 @@ def _format_exchange_time(raw) -> str:
 #           a profit.
 #         • periods emitted oldest-first were never re-ordered, inverting
 #           QoQ/YoY (-27.43% where the truth was +0.10%).
-SUMMARY_FORMAT_VERSION = 8
+#   9 = results DETECTION and units again (output.py) — a v8 cache holds a
+#       generic Stock Bits notice for filings that do report figures:
+#         • looks_like_financial_results() now counts the line-item names an
+#           INVESTOR PRESENTATION uses (Net Sales, Gross Contribution, PBDIT)
+#           and their uppercase abbreviations, not just the statutory ones.
+#           Asian Paints' Q1FY27 deck matched exactly one term ("revenue") and
+#           was classified as a notice despite carrying Net Sales / PBDIT / PBT
+#           / PAT for two periods.
+#         • detect_document_scale() tolerates an OCR-mangled denomination
+#           heading ("(₹ in Crores)" scanned as "(f in Crorea)"), which
+#           previously read as "no denomination stated" — so figures went out
+#           with no ₹ and no Cr at all.
+#         • _names_plausibly_match() no longer discards every metric when the
+#           exchange's record for the filing is the bare SYMBOL ("TATAPOWER"
+#           shares no word with "The Tata Power Company Limited").
+SUMMARY_FORMAT_VERSION = 9
 
 
 
@@ -732,15 +747,46 @@ def _shorten_download_url(url: str) -> str:
         return url
 
 
+def _no_summary_caption(company, symbol, filing_type, download_url="") -> str:
+    """
+    The alert sent when the AI summary could not be produced at all (LLM error,
+    or the whole summary exceeded config.SUMMARY_TIMEOUT_SEC).
+
+    Deliberately built in the SAME 📢/🏢/⚡/🤖/📎 marker layout output.py
+    produces, because _parse_stock_bits_parts() reads the template variables
+    back OUT of those markers. The old fallback ("📄 *<company>* — <title>")
+    carried none of them, so a closed-window send mapped {{4}} (the body) to ""
+    — which whatsapp._sanitize_template_param turns into the literal
+    "NSE filing" — and {{5}} to the bare equityalerts.in homepage. Subscribers
+    received a template with no summary, no filing title and no working link:
+    the "template fired but nothing was generated" report. The filing title and
+    the real download URL are always available here, so the degraded alert can
+    at least say WHAT was filed and link to it.
+    """
+    lines = [
+        "📢 *EquityAlerts Stock Bits!!*", "",
+        f"🏢 {company} ({symbol})", "",
+        f"⚡ {filing_type}", "",
+        f"🤖 {company} has filed \"{filing_type}\" with the exchange. "
+        f"An automated summary isn't available for this filing — open it below "
+        f"for the full details.", "",
+    ]
+    if download_url:
+        lines += [f"📎 Download filing: {download_url}", ""]
+    lines += [
+        "You are receiving this stock update per your request on "
+        "https://equityalerts.in/portal",
+        "Disclaimer: https://equityalerts.in/portal/disclaimer",
+    ]
+    return "\n".join(lines)
+
+
 def _full_caption(company, symbol, filing_type, file_path, raw_time,
                   download_url="") -> str:
     """One-message caption = EquiSense Stock Bits alert (or basic fallback)."""
     # Show a branded short link under our own domain instead of the raw NSE URL.
     download_url = _shorten_download_url(download_url)
-    fallback = (
-        f"📄 *{company}* — {filing_type}\n"
-        f"🏦 Symbol: {symbol}"
-    )
+    fallback = _no_summary_caption(company, symbol, filing_type, download_url)
     body = _build_caption(file_path, fallback, company,
                           filing_type=filing_type, download_url=download_url)
     return _caption_with_time(body, company, symbol, raw_time)
