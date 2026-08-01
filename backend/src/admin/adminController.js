@@ -34,8 +34,8 @@ function meta(req, res) {
         // panel without any change to this product or to the dashboard's
         // core code — only a new renderer needs to be added for a genuinely
         // new module type.
-        panelModules: ["stats", "user-directory", "company-directory"],
-        capabilities: ["stats", "users", "actions", "options", "bulk-actions", "companies"],
+        panelModules: ["stats", "user-directory", "company-directory", "message-tester"],
+        capabilities: ["stats", "users", "actions", "options", "bulk-actions", "companies", "message-preview"],
         // Product-level actions that don't target a single user. The dashboard
         // renders these as a "Bulk actions" panel (see ARCHITECTURE.md) and
         // POSTs them to /bulk-actions/:actionKey. Same field-spec format as the
@@ -856,6 +856,36 @@ async function getCompanyDetail(req, res) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// POST /api/admin/v1/preview-message
+//
+// Runs a filing PDF through the bot's real pipeline and returns exactly the
+// WhatsApp message(s) it would send — WITHOUT sending anything or touching
+// any database. Built so admins can verify a template/prompt change before
+// it reaches any of the 120+ live subscribers. See adminRepository's
+// previewWhatsAppMessage and bot/preview.py for the full safety trace.
+// ---------------------------------------------------------------------------
+async function previewMessage(req, res) {
+    try {
+        const pdfUrl = String(req.body.pdfUrl || "").trim();
+        if (!pdfUrl) {
+            return res.status(400).json({ success: false, message: "pdfUrl is required" });
+        }
+
+        const report = await repo.previewWhatsAppMessage({
+            pdfUrl,
+            company: req.body.company,
+            symbol: req.body.symbol,
+            filingType: req.body.filingType,
+        });
+
+        res.json({ success: true, report });
+    } catch (err) {
+        console.error(err);
+        res.status(err.status || 502).json({ success: false, message: err.message });
+    }
+}
+
 module.exports = {
     meta,
     stats,
@@ -867,4 +897,5 @@ module.exports = {
     getOptions,
     listCompanies,
     getCompanyDetail,
+    previewMessage,
 };

@@ -568,6 +568,60 @@ def admin_openai_cost_today():
         return jsonify({"success": False, "message": "Failed to load OpenAI cost"}), 500
 
 
+@app.route("/admin/preview-message", methods=["POST"])
+def admin_preview_message():
+    """
+    JSON counterpart to /admin/preview (below), which takes a browser file
+    upload. This takes a PDF URL instead — e.g. a filing already scraped and
+    shown in the Central Dashboard's "Scraped companies" panel — downloads
+    it, and runs it through the exact same side-effect-free pipeline as
+    preview.preview_pdf(): NO WhatsApp send, NO bot_data.db / PostgreSQL
+    write. The only network calls are downloading this one PDF and the
+    configured LLM provider (needed to generate the real summary). See
+    preview.py's module docstring for the full trace of what it calls.
+
+    Auth via the x-bot-admin-key header (like every other JSON /admin/*
+    endpoint here) rather than /admin/preview's query-string ?key= — this
+    one is meant to be called server-to-server by the NSE backend's admin
+    API, which the Central Dashboard's "Message tester" panel talks to, so
+    the shared secret never has to reach the browser.
+    """
+    provided = request.headers.get("x-bot-admin-key", "")
+    expected = config.BOT_ADMIN_KEY
+
+    if not expected:
+        return jsonify({"success": False, "message": "Admin API is not configured on this server"}), 500
+    if not hmac.compare_digest(provided, expected):
+        return jsonify({"success": False, "message": "Invalid or missing x-bot-admin-key header"}), 401
+
+    body = request.get_json(silent=True) or {}
+    pdf_url = str(body.get("pdfUrl") or "").strip()
+    if not pdf_url:
+        return jsonify({"success": False, "message": "pdfUrl is required"}), 400
+
+    import output
+    import preview as preview_mod
+
+    tmp_path = None
+    try:
+        tmp_path = output.download_pdf(pdf_url)
+        report = preview_mod.preview_pdf(
+            tmp_path,
+            company=(str(body.get("company") or "").strip() or None),
+            symbol=(str(body.get("symbol") or "").strip() or "N/A"),
+            filing_type=(str(body.get("filingType") or "").strip() or "Investor Filing"),
+            download_url=pdf_url,
+        )
+        report["pdf_url"] = pdf_url
+        return jsonify({"success": True, "report": report})
+    except Exception as e:
+        print(f"❌ /admin/preview-message error: {e}")
+        return jsonify({"success": False, "message": f"Preview failed: {e}"}), 500
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
 def _preview_report_html(report: dict) -> str:
     """Render a preview.preview_pdf() report dict as an HTML fragment."""
     import html as html_lib
@@ -895,4 +949,11 @@ if __name__ == "__main__":
 
     print(f"🚀 NSE WhatsApp Bot running on port {config.FLASK_PORT}")
     print(f"🌐 Subscription portal: {PORTAL_URL}")
-    app.run(host="0.0.0.0", port=config.FLASK_PORT, debug=config.FLASK_DEBUG)
+    # threaded=True: /admin/preview-message runs the real PDF-download + LLM
+    # pipeline and can take 30-60s. Without this, Flask's dev server handles
+    # one HTTP request at a time — a slow preview would block the /webhook
+    # route (inbound messages, Meta delivery-status callbacks) for its whole
+    # duration. The background dispatch loops (live/backfill/reminder) are
+    # already on their own threads either way; this only affects HTTP
+    # request handling.
+    app.run(host="0.0.0.0", port=config.FLASK_PORT, debug=config.FLASK_DEBUG, threaded=True)

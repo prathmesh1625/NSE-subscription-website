@@ -570,6 +570,60 @@ async function fetchOpenAiCostToday() {
     }
 }
 
+/**
+ * Runs a filing PDF through the bot's REAL summarization + WhatsApp
+ * template-routing pipeline and returns exactly what subscribers would
+ * receive — WITHOUT sending anything or touching bot_data.db / PostgreSQL.
+ * See bot/preview.py's module docstring and Bot.py's /admin/preview-message
+ * for the full trace of what it calls and why it's provably side-effect-free
+ * on the WhatsApp/DB side (the only network calls are downloading this PDF
+ * and the configured LLM provider, to produce the real summary).
+ *
+ * Unlike the stat-card fetchers above, this deliberately does NOT fail
+ * soft — it's a user-initiated action (an admin clicked "Run test"), so a
+ * failure (bot unreachable, PDF unreachable, LLM error) must surface as a
+ * real error, not silently become "no data".
+ */
+async function previewWhatsAppMessage({ pdfUrl, company, symbol, filingType }) {
+    const baseUrl = process.env.BOT_ADMIN_URL;
+    const apiKey = process.env.BOT_ADMIN_KEY;
+
+    if (!baseUrl || !apiKey) {
+        const err = new Error(
+            "BOT_ADMIN_URL/BOT_ADMIN_KEY are not configured on this backend, so it can't reach the bot's preview pipeline."
+        );
+        err.status = 500;
+        throw err;
+    }
+
+    try {
+        const response = await axios.post(
+            `${baseUrl}/admin/preview-message`,
+            { pdfUrl, company, symbol, filingType },
+            {
+                headers: { "x-bot-admin-key": apiKey },
+                // The real pipeline downloads the PDF and calls the LLM
+                // provider — can genuinely take 30-60s, far past this
+                // file's other (fast, DB-only) admin calls.
+                timeout: 90000,
+            }
+        );
+        return response.data.report;
+    } catch (err) {
+        if (err.response) {
+            const wrapped = new Error(
+                (err.response.data && err.response.data.message) ||
+                    `Bot responded with status ${err.response.status}`
+            );
+            wrapped.status = err.response.status;
+            throw wrapped;
+        }
+        const wrapped = new Error(`Could not reach the bot for preview: ${err.code || err.message}`);
+        wrapped.status = 502;
+        throw wrapped;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Option lists (for building forms in the dashboard)
 // ---------------------------------------------------------------------------
@@ -746,4 +800,5 @@ module.exports = {
     fetchDeliveryStatusMap,
     fetchTemplatesSentToday,
     fetchOpenAiCostToday,
+    previewWhatsAppMessage,
 };
