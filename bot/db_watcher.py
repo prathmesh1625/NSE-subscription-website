@@ -406,7 +406,13 @@ def _format_exchange_time(raw) -> str:
 #       of those holds a summary written from the covering letter alone — or the
 #       "no summary available" notice — where the published results table is now
 #       readable. Re-extracting, not re-formatting.
-SUMMARY_FORMAT_VERSION = 10
+#  11 = an earnings-call TRANSCRIPT is no longer treated as a results filing
+#       (output.py). It names every metric, quotes spoken figures and says
+#       "quarter ended", so it passed results detection and shipped as
+#       "Jun 2026 Results Out" with a padded third period — Mar 2026 and
+#       Jun 2025 carrying the same value, QoQ identical to YoY. A v10 cache for
+#       one holds that fabricated metrics table and must not be re-sent.
+SUMMARY_FORMAT_VERSION = 11
 
 
 

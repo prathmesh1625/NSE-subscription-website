@@ -828,6 +828,56 @@ _METRIC_ABBREV_RE = re.compile(
 _MONEY_RE = re.compile(r"\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d+\.\d{2}")
 
 
+# An earnings-CALL TRANSCRIPT discusses the quarter that was just reported, so
+# it names every metric, quotes figures for them and says "quarter ended" —
+# it passes every results test while containing no results TABLE at all. The
+# figures in it are spoken: rounded ("859 crores"), partial, and quoted for
+# whichever periods the speaker felt like comparing. Shipped as a results alert
+# it produced Shakti Pumps' "Jun 2026 Results Out" with Mar 2026 and Jun 2025
+# carrying identical values, because the model padded a third period that was
+# never discussed.
+#
+# Each marker carries the count that makes it conclusive, so a REAL results
+# filing mentioning its upcoming call once ("...conference call will be held")
+# cannot trip it — Asian Paints' results filing says "conference call" exactly
+# once, below the threshold of 2. Measured across the corpus: the transcript
+# matched 6 markers, every genuine filing matched 0.
+_TRANSCRIPT_MARKERS = (
+    (re.compile(r"\bmoderator\b", re.IGNORECASE), 3),        # dialogue turns
+    (re.compile(r"\bnext question\b", re.IGNORECASE), 2),
+    (re.compile(r"ladies and gentlemen", re.IGNORECASE), 1),
+    (re.compile(r"question[\s\-]?and[\s\-]?answer session", re.IGNORECASE), 1),
+    (re.compile(r"\bearnings (?:conference )?call\b", re.IGNORECASE), 2),
+    (re.compile(r"\bconference call\b", re.IGNORECASE), 2),
+)
+
+# Document types whose TITLE alone rules out a results table. The exchange's
+# own title is authoritative where our text heuristics are inference, so it is
+# worth checking on its own.
+_NON_RESULTS_TITLE_RE = re.compile(
+    r"transcript|audio recording|earnings call|analyst meet|investor meet",
+    re.IGNORECASE,
+)
+
+
+def looks_like_call_transcript(pdf_text: str, filing_type: str = "") -> bool:
+    """
+    True for an earnings-call transcript — a document that reads like a results
+    filing to every keyword test but contains only spoken figures.
+
+    Two independent routes: the exchange's own filing title, and the dialogue
+    shape of the document itself (two markers must clear their thresholds, so a
+    single passing mention of a call cannot trigger it).
+    """
+    if filing_type and _NON_RESULTS_TITLE_RE.search(filing_type):
+        return True
+    if not pdf_text:
+        return False
+    score = sum(1 for rx, threshold in _TRANSCRIPT_MARKERS
+                if len(rx.findall(pdf_text)) >= threshold)
+    return score >= 2
+
+
 def count_metric_terms(pdf_text: str) -> int:
     """
     How many DISTINCT P&L line items the text names, counting both the spelled
@@ -854,8 +904,13 @@ def looks_like_financial_results(pdf_text: str) -> bool:
     The monetary-figure floor is what keeps the widened metric vocabulary safe:
     a newspaper-publication INTIMATION names the results in its subject line
     but carries no table, so it still cannot reach 12 figures.
+
+    An earnings-call TRANSCRIPT is excluded outright: it clears every test above
+    while containing no table — see looks_like_call_transcript.
     """
     if not pdf_text:
+        return False
+    if looks_like_call_transcript(pdf_text):
         return False
     low = pdf_text.lower()
     has_phrase   = any(p in low for p in _RESULT_PHRASES)
@@ -1323,6 +1378,43 @@ def recompute_changes(summary: "FinancialSummary") -> int:
     return fixed
 
 
+def drop_duplicate_period_metrics(summary: "FinancialSummary") -> int:
+    """
+    Drop any metric that quotes the SAME value for two different periods —
+    the signature of the model padding out periods the document never reported.
+
+    A results TABLE always prints three distinct columns. A transcript, a press
+    release or a two-period investor deck gives the model fewer, and rather than
+    return two periods it repeats one to fill the third: Shakti Pumps' earnings
+    call went out with revenue "Jun 2026: ₹859 Cr / Mar 2026: ₹623 Cr /
+    Jun 2025: ₹623 Cr" and, inevitably, a QoQ identical to the YoY.
+
+    Dropping the whole metric is deliberate. Which of the two duplicated columns
+    is the invented one is not knowable, and removing one would silently shift
+    the remaining periods under headings that mean something else — a YoY change
+    rendered as QoQ. Losing a row is recoverable; publishing a fabricated
+    quarter under a real company's name is not. A genuinely flat metric (a
+    margin identical two quarters running) is the accepted cost.
+
+    Returns the number of metrics kept.
+    """
+    kept = []
+    for m in summary.metrics:
+        seen, duplicate = [], False
+        for p in m.periods:
+            mag = _period_magnitude(p.value, m.unit)
+            if mag is None:
+                continue
+            if any(abs(mag - s) < 1e-9 for s in seen):
+                duplicate = True
+                break
+            seen.append(mag)
+        if not duplicate:
+            kept.append(m)
+    summary.metrics = kept
+    return len(kept)
+
+
 def drop_implausible_metrics(summary: "FinancialSummary") -> int:
     """
     Drop any metric with a period value whose magnitude is implausible for a
@@ -1453,7 +1545,13 @@ def process_pdf(
     summary     = None
     company     = company_hint or "Unknown Company"
 
-    if looks_like_financial_results(pdf_text):
+    if looks_like_call_transcript(pdf_text, filing_type):
+        # Checked separately from looks_like_financial_results so the reason is
+        # visible in the log, and so the exchange's own filing TITLE counts —
+        # looks_like_financial_results only ever sees the text.
+        print("[2/3] Earnings-call transcript / recording — no results table to "
+              "extract; using a plain content summary.", file=sys.stderr)
+    elif looks_like_financial_results(pdf_text):
         print(f"[2/3] Results document detected — extracting financials via "
               f"{provider} / {_model_name} ...", file=sys.stderr)
         try:
@@ -1505,6 +1603,14 @@ def process_pdf(
             if plausible != verified:
                 print(f"      Dropped {verified - plausible} metric(s) with "
                       f"implausible magnitude.", file=sys.stderr)
+            #  4b. padding: drop metrics repeating one value across two periods,
+            #     which means the document reported fewer periods than the model
+            #     emitted. Runs after the unit steps so the comparison is on
+            #     final, like-for-like magnitudes.
+            distinct = drop_duplicate_period_metrics(summary)
+            if distinct != plausible:
+                print(f"      Dropped {plausible - distinct} metric(s) repeating "
+                      f"one value across periods (padded).", file=sys.stderr)
             #  5. order: put each metric's periods newest-first, so the change
             #     below compares the right pair and the rows read in the order
             #     the template's headings imply.
