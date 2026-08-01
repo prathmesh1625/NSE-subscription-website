@@ -34,8 +34,8 @@ function meta(req, res) {
         // panel without any change to this product or to the dashboard's
         // core code — only a new renderer needs to be added for a genuinely
         // new module type.
-        panelModules: ["stats", "user-directory"],
-        capabilities: ["stats", "users", "actions", "options", "bulk-actions"],
+        panelModules: ["stats", "user-directory", "company-directory"],
+        capabilities: ["stats", "users", "actions", "options", "bulk-actions", "companies"],
         // Product-level actions that don't target a single user. The dashboard
         // renders these as a "Bulk actions" panel (see ARCHITECTURE.md) and
         // POSTs them to /bulk-actions/:actionKey. Same field-spec format as the
@@ -781,6 +781,81 @@ async function getOptions(req, res) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/admin/v1/companies?search=&page=&pageSize=
+//
+// Scraped-companies browser, backed by the scraper's own database
+// (nse_ingestion — see adminRepository's listScrapedCompanies). Shaped the
+// same as GET /users (primary/secondary/tags) so the dashboard can reuse its
+// existing directory-table renderer for this too.
+// ---------------------------------------------------------------------------
+async function listCompanies(req, res) {
+    try {
+        const search = String(req.query.search || "").trim();
+        const page = Math.max(1, Number(req.query.page) || 1);
+        const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
+
+        const { rows, total } = await repo.listScrapedCompanies(search, page, pageSize);
+
+        res.json({
+            success: true,
+            total,
+            page,
+            pageSize,
+            companies: rows.map((c) => ({
+                id: c.symbol,
+                primary: c.symbol,
+                secondary: c.companyName || "(name not on file)",
+                tags: [],
+                filingCount: c.filingCount,
+                latestFilingAt: c.latestFilingAt,
+            })),
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: "Failed to load scraped companies" });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/v1/companies/:symbol
+//
+// Every filing the scraper has picked up for one company — shaped as a
+// single generic "table" section, same contract as a user's payment-history
+// section, so the dashboard renders it with no new component.
+// ---------------------------------------------------------------------------
+async function getCompanyDetail(req, res) {
+    try {
+        const symbol = req.params.symbol;
+        const filings = await repo.getCompanyFilings(symbol);
+
+        res.json({
+            success: true,
+            symbol,
+            filingCount: filings.length,
+            sections: [
+                {
+                    key: "filings",
+                    title: `Scraped filings — ${symbol}`,
+                    type: "table",
+                    data: {
+                        columns: ["Filed on", "Title", "Status", "PDF"],
+                        rows: filings.map((f) => [
+                            f.announcement_time,
+                            f.title || "(untitled)",
+                            f.download_status,
+                            f.pdf_url,
+                        ]),
+                    },
+                },
+            ],
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: "Failed to load company filings" });
+    }
+}
+
 module.exports = {
     meta,
     stats,
@@ -790,4 +865,6 @@ module.exports = {
     runAction,
     runBulkAction,
     getOptions,
+    listCompanies,
+    getCompanyDetail,
 };

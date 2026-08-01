@@ -1,5 +1,6 @@
 const axios = require("axios");
 const db = require("../config/database");
+const ingestionDb = require("../config/ingestionDatabase");
 
 // ---------------------------------------------------------------------------
 // Stats
@@ -296,27 +297,48 @@ async function addCompaniesToAllUsers(companyIds) {
         return { addedLinks: 0, userCount: 0 };
     }
 
-    const inserted = await db.query(
-        `
-        INSERT INTO user_companies (user_id, company_id)
-        SELECT u.id, c.company_id
-        FROM users u
-        CROSS JOIN unnest($1::bigint[]) AS c(company_id)
-        ON CONFLICT (user_id, company_id) DO NOTHING
-        `,
-        [ids]
-    );
+    // Both writes must land together: the watchlist rows and the
+    // "default for future signups" flag describe the same intent, so a
+    // failure partway through must not leave one applied without the other.
+    const client = await db.pool.connect();
+    let addedLinks = 0;
 
-    // These companies also become part of the "default watchlist" every NEW
-    // user is seeded with on signup (see userCompanyRepository.seedDefaultCompanies)
-    // — so this action stays true for anyone who joins after it runs, not
-    // just users who already existed at the time.
-    await db.query(`UPDATE companies SET is_default_watchlist = TRUE WHERE id = ANY($1::bigint[])`, [ids]);
+    try {
+        await client.query("BEGIN");
+
+        const inserted = await client.query(
+            `
+            INSERT INTO user_companies (user_id, company_id)
+            SELECT u.id, c.company_id
+            FROM users u
+            CROSS JOIN unnest($1::bigint[]) AS c(company_id)
+            ON CONFLICT (user_id, company_id) DO NOTHING
+            `,
+            [ids]
+        );
+        addedLinks = inserted.rowCount;
+
+        // These companies also become part of the "default watchlist" every NEW
+        // user is seeded with on signup (see userCompanyRepository.seedDefaultCompanies)
+        // — so this action stays true for anyone who joins after it runs, not
+        // just users who already existed at the time.
+        await client.query(
+            `UPDATE companies SET is_default_watchlist = TRUE WHERE id = ANY($1::bigint[])`,
+            [ids]
+        );
+
+        await client.query("COMMIT");
+    } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+    } finally {
+        client.release();
+    }
 
     const userCountResult = await db.query(`SELECT COUNT(*)::int AS count FROM users`);
 
     return {
-        addedLinks: inserted.rowCount,
+        addedLinks,
         userCount: userCountResult.rows[0].count,
     };
 }
@@ -339,20 +361,41 @@ async function removeCompaniesFromAllUsers(companyIds) {
         return { removedLinks: 0, userCount: 0 };
     }
 
-    const deleted = await db.query(
-        `DELETE FROM user_companies WHERE company_id = ANY($1::bigint[])`,
-        [ids]
-    );
+    // Wrapped in a transaction for the same reason as addCompaniesToAllUsers:
+    // this is a destructive, irreversible mass delete, so it must not commit
+    // unless the accompanying default-watchlist flag update also succeeds.
+    const client = await db.pool.connect();
+    let removedLinks = 0;
 
-    // Mirror of the flag set in addCompaniesToAllUsers — a company removed
-    // from everyone should also stop being seeded into anyone who signs up
-    // afterwards.
-    await db.query(`UPDATE companies SET is_default_watchlist = FALSE WHERE id = ANY($1::bigint[])`, [ids]);
+    try {
+        await client.query("BEGIN");
+
+        const deleted = await client.query(
+            `DELETE FROM user_companies WHERE company_id = ANY($1::bigint[])`,
+            [ids]
+        );
+        removedLinks = deleted.rowCount;
+
+        // Mirror of the flag set in addCompaniesToAllUsers — a company removed
+        // from everyone should also stop being seeded into anyone who signs up
+        // afterwards.
+        await client.query(
+            `UPDATE companies SET is_default_watchlist = FALSE WHERE id = ANY($1::bigint[])`,
+            [ids]
+        );
+
+        await client.query("COMMIT");
+    } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+    } finally {
+        client.release();
+    }
 
     const userCountResult = await db.query(`SELECT COUNT(*)::int AS count FROM users`);
 
     return {
-        removedLinks: deleted.rowCount,
+        removedLinks,
         userCount: userCountResult.rows[0].count,
     };
 }
@@ -591,6 +634,92 @@ async function searchCompanies(search, selectedIds = []) {
     return [...selectedResult.rows, ...generalResult.rows];
 }
 
+// ---------------------------------------------------------------------------
+// Scraped companies browser (backed by the SCRAPER's own database,
+// nse_ingestion — separate from everything else in this file, which reads
+// nse_subscription). Lets an admin see, per company the scraper tracks,
+// every filing PDF it has picked up, without needing DB access.
+// ---------------------------------------------------------------------------
+
+/**
+ * One row per company the scraper has ever filed an announcement for, with
+ * a filing count and the most recent filing time. `search` matches the NSE/
+ * BSE symbol (e.g. "TATAPOWER").
+ */
+async function listScrapedCompanies(search, page, pageSize) {
+    const offset = (page - 1) * pageSize;
+    const like = `%${search || ""}%`;
+
+    const result = await ingestionDb.query(
+        `
+        SELECT
+            company_symbol,
+            COUNT(*)::int              AS filing_count,
+            MAX(announcement_time)     AS latest_filing_at
+        FROM announcements
+        WHERE ($1 = '' OR company_symbol ILIKE $2)
+        GROUP BY company_symbol
+        ORDER BY latest_filing_at DESC NULLS LAST
+        LIMIT $3 OFFSET $4
+        `,
+        [search || "", like, pageSize, offset]
+    );
+
+    const countResult = await ingestionDb.query(
+        `
+        SELECT COUNT(DISTINCT company_symbol)::int AS count
+        FROM announcements
+        WHERE ($1 = '' OR company_symbol ILIKE $2)
+        `,
+        [search || "", like]
+    );
+
+    const symbols = result.rows.map((r) => r.company_symbol);
+    const nameMap = await getCompanyNamesBySymbols(symbols);
+
+    return {
+        rows: result.rows.map((r) => ({
+            symbol: r.company_symbol,
+            companyName: nameMap.get(r.company_symbol) || null,
+            filingCount: r.filing_count,
+            latestFilingAt: r.latest_filing_at,
+        })),
+        total: countResult.rows[0].count,
+    };
+}
+
+/**
+ * Looks up display names for a batch of symbols from the main
+ * nse_subscription database's `companies` table. Done as a separate query
+ * merged in JS (not a SQL JOIN) because announcements lives in a different
+ * physical database (nse_ingestion) than companies (nse_subscription).
+ */
+async function getCompanyNamesBySymbols(symbols) {
+    if (!symbols.length) return new Map();
+    const result = await db.query(
+        `SELECT symbol, company_name FROM companies WHERE symbol = ANY($1::text[])`,
+        [symbols]
+    );
+    const map = new Map();
+    result.rows.forEach((r) => map.set(r.symbol, r.company_name));
+    return map;
+}
+
+/** Every filing the scraper has recorded for one company symbol, most recent first. */
+async function getCompanyFilings(symbol) {
+    const result = await ingestionDb.query(
+        `
+        SELECT id, title, pdf_url, local_path, announcement_time, download_status, created_at
+        FROM announcements
+        WHERE company_symbol = $1
+        ORDER BY announcement_time DESC NULLS LAST, id DESC
+        LIMIT 200
+        `,
+        [symbol]
+    );
+    return result.rows;
+}
+
 module.exports = {
     getStats,
     getSuccessfulPayments,
@@ -610,6 +739,8 @@ module.exports = {
     listPlans,
     updatePlanCompanyLimit,
     searchCompanies,
+    listScrapedCompanies,
+    getCompanyFilings,
     getActiveSubscribers,
     normalizePhoneForBot,
     fetchDeliveryStatusMap,

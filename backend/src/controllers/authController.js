@@ -211,9 +211,23 @@ async function verifyToken(
             // adminRepository.addCompaniesToAllUsers) — so they land on
             // their dashboard after login with those companies already
             // tracked, not an empty list.
-            await userCompanyRepository.seedDefaultCompanies(
-                user.id
-            );
+            //
+            // Deliberately fail-soft: signing in is core, the starter
+            // watchlist is not. If this throws (e.g. the
+            // companies.is_default_watchlist column hasn't been migrated on
+            // this environment yet) the user must still get their session
+            // rather than a 500 — they'd otherwise be left with an account
+            // they can't log into on the first attempt.
+            try {
+                await userCompanyRepository.seedDefaultCompanies(
+                    user.id
+                );
+            } catch (seedErr) {
+                console.error(
+                    "Could not seed default watchlist for new user:",
+                    seedErr.message
+                );
+            }
 
         }
 

@@ -15,5 +15,7 @@ router.get("/users/:id", adminController.getUser);
 router.post("/users/:id/actions/:actionKey", adminController.runAction);
 router.post("/bulk-actions/:actionKey", adminController.runBulkAction);
 router.get("/options/:key", adminController.getOptions);
+router.get("/companies", adminController.listCompanies);
+router.get("/companies/:symbol", adminController.getCompanyDetail);
 
 module.exports = router;

@@ -29,6 +29,9 @@ services:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_NAME=nse_subscription
+      # Second database on the same Postgres server, owned by the scraper —
+      # read-only, only for the admin API's "scraped companies" browser.
+      - DB_NAME_INGESTION=${DB_NAME_INGESTION:-nse_ingestion}
       - DB_USER=${DB_USER:-postgres}
       - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in the environment}
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set in the environment}
