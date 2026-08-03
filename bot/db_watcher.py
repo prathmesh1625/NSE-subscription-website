@@ -692,10 +692,12 @@ def _caption_with_time(body: str, company: str, symbol: str, raw_time) -> str:
 def _build_caption(file_path, fallback_caption, company=None,
                    filing_type="", download_url=""):
     """
-    Return the rich AI summary BODY (cached if already generated). Caches the
-    time-less body only. `filing_type` and `download_url` feed the ⚡ event line
-    and 📎 download link. The cap is well above the old template limit so the
-    footer + download link at the end of a text message aren't truncated away.
+    Return (BODY, summary_ok) — the rich AI summary body (cached if already
+    generated), or `fallback_caption` with summary_ok=False when the AI summary
+    could not be produced. Caches the time-less body only. `filing_type` and
+    `download_url` feed the ⚡ event line and 📎 download link. The cap is well
+    above the old template limit so the footer + download link at the end of a
+    text message aren't truncated away.
     """
     file_key = os.path.basename(file_path).strip()
     # Only reuse a cached summary that was produced by the CURRENT layout —
@@ -703,14 +705,16 @@ def _build_caption(file_path, fallback_caption, company=None,
     # the old layout forever (this is why results kept arriving as "Stock Bits").
     cached   = bot_db.get_filing_summary(file_key, SUMMARY_FORMAT_VERSION)
     if cached:
-        return cached
+        return cached, True
 
     ai_summary = generate_pdf_summary(file_path, company, filing_type, download_url)
     if ai_summary:
         trimmed = ai_summary[:3997] + "..." if len(ai_summary) > 4000 else ai_summary
         bot_db.save_filing_summary(file_key, trimmed, SUMMARY_FORMAT_VERSION)
-        return trimmed
-    return fallback_caption
+        return trimmed, True
+    # Failure is NOT cached — the caller decides whether to retry on a later
+    # poll or accept the degraded caption.
+    return fallback_caption, False
 
 
 # ── Parallel single-message caption builder ──────────────────────────────────
@@ -792,15 +796,68 @@ def _no_summary_caption(company, symbol, filing_type, download_url="") -> str:
     return "\n".join(lines)
 
 
-def _full_caption(company, symbol, filing_type, file_path, raw_time,
-                  download_url="") -> str:
-    """One-message caption = EquiSense Stock Bits alert (or basic fallback)."""
+def _full_caption_ex(company, symbol, filing_type, file_path, raw_time,
+                     download_url="") -> tuple:
+    """
+    (caption, summary_ok) — the one-message EquiSense Stock Bits alert, plus
+    whether the AI summary actually succeeded. Callers that can afford to wait
+    use the flag to retry on a later poll instead of delivering the degraded
+    caption; see _should_defer_for_summary.
+    """
     # Show a branded short link under our own domain instead of the raw NSE URL.
     download_url = _shorten_download_url(download_url)
     fallback = _no_summary_caption(company, symbol, filing_type, download_url)
-    body = _build_caption(file_path, fallback, company,
-                          filing_type=filing_type, download_url=download_url)
-    return _caption_with_time(body, company, symbol, raw_time)
+    body, summary_ok = _build_caption(file_path, fallback, company,
+                                      filing_type=filing_type,
+                                      download_url=download_url)
+    return _caption_with_time(body, company, symbol, raw_time), summary_ok
+
+
+def _full_caption(company, symbol, filing_type, file_path, raw_time,
+                  download_url="") -> str:
+    """One-message caption = EquiSense Stock Bits alert (or basic fallback)."""
+    caption, _ = _full_caption_ex(company, symbol, filing_type, file_path,
+                                  raw_time, download_url)
+    return caption
+
+
+# Per-filing count of failed summary attempts, for the live dispatch path only.
+# Deliberately in-process and not persisted: it exists to ride out a transient
+# LLM error over the next few polls, and SUMMARY_RETRY_MAX_AGE_SEC is what
+# bounds the filing after a restart clears this.
+_summary_attempts = {}
+_summary_attempts_lock = threading.Lock()
+
+
+def _should_defer_for_summary(filing_id, age_seconds) -> bool:
+    """
+    True if this filing should be held back — NOT sent, NOT marked notified —
+    so the next poll can retry its AI summary.
+
+    Gives up (returns False, meaning "send the degraded caption now") once the
+    filing has burned SUMMARY_RETRY_ATTEMPTS tries or is older than
+    SUMMARY_RETRY_MAX_AGE_SEC. A filing whose PDF simply cannot be summarised
+    must still reach subscribers; the point is only to stop a two-second API
+    blip from costing them the summary permanently.
+    """
+    max_attempts = getattr(config, "SUMMARY_RETRY_ATTEMPTS", 3)
+    max_age      = getattr(config, "SUMMARY_RETRY_MAX_AGE_SEC", 300)
+
+    # Age wins over the counter: it is the bound that survives a restart.
+    if age_seconds is not None and age_seconds >= max_age:
+        return False
+
+    with _summary_attempts_lock:
+        attempts = _summary_attempts.get(filing_id, 0) + 1
+        _summary_attempts[filing_id] = attempts
+
+    return attempts < max_attempts
+
+
+def _clear_summary_attempts(filing_id):
+    """Drop a filing's retry counter once it is on its way out, either way."""
+    with _summary_attempts_lock:
+        _summary_attempts.pop(filing_id, None)
 
 
 def _resolve_send_path(file_path, caption, file_key):
@@ -1370,7 +1427,7 @@ def process_new_filings():
     # ── Phase 2: build all captions concurrently (summary + exchange time) ─
     futures = {
         j["file_key"]: _caption_pool.submit(
-            _full_caption, j["company"], j["symbol"], j["filing_type"],
+            _full_caption_ex, j["company"], j["symbol"], j["filing_type"],
             j["file_path"], j["raw_time"], j["download_url"],
         )
         for j in jobs
@@ -1379,13 +1436,33 @@ def process_new_filings():
     # ── Phase 3: deliver ONE message per subscriber ──────────────────────
     for j in jobs:
         try:
-            caption = futures[j["file_key"]].result()
+            caption, summary_ok = futures[j["file_key"]].result()
         except Exception as e:
             print(f"❌ Caption build failed for {j['file_key']}: {e}")
             caption = _caption_with_time(
                 f"📄 *{j['company']}* — {j['filing_type']}\n🏦 Symbol: {j['symbol']}",
                 j["company"], j["symbol"], j["raw_time"],
             )
+            summary_ok = False
+
+        # The AI summary failed. Leave the filing is_notified=FALSE and send
+        # nothing this round, so the next poll re-summarises it — the LLM
+        # errors behind this (a 429 in a results-day burst, a timeout) clear in
+        # seconds, and delivering now would lock in the degraded caption
+        # forever. Bounded by attempts and age; once those run out the filing
+        # goes out with the fallback exactly as before.
+        if not summary_ok and _should_defer_for_summary(
+            j["filing_id"], j.get("age_seconds")
+        ):
+            print(f"⏳ Summary unavailable for {j['symbol']} '{j['filing_type']}' — "
+                  f"holding delivery for the next poll.")
+            continue
+
+        if not summary_ok:
+            print(f"⚠️  Summary still unavailable for {j['symbol']} "
+                  f"'{j['filing_type']}' after retries — sending basic caption.")
+
+        _clear_summary_attempts(j["filing_id"])
 
         age = j.get("age_seconds")
         age_note = f" [saved {age}s ago by scraper]" if age is not None else ""
