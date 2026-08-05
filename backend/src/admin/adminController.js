@@ -349,27 +349,14 @@ async function listUsers(req, res) {
             pageSize,
             users: rows.map((u) => {
                 const tags = [u.plan_name, u.sub_status].filter(Boolean);
-                const delivery = deliveryMap.get(repo.normalizePhoneForBot(u.mobile));
                 if (u.sub_status === "ACTIVE") {
-                    if (delivery && delivery.pendingCount > 0) tags.push("PDF ISSUE");
+                    const status = deliveryMap.get(repo.normalizePhoneForBot(u.mobile));
+                    if (status && status.pendingCount > 0) tags.push("PDF ISSUE");
                 }
                 return {
                     id: String(u.id),
                     primary: u.mobile,
                     secondary: u.name || "(no name on file)",
-                    // How many announcement alerts this user has actually
-                    // received, and when the last one landed — shown as
-                    // directory columns so an admin can spot a silent user
-                    // without opening each profile. Comes from the bot's
-                    // delivery snapshot, so it's null when the bot is
-                    // unreachable (rendered as "—" rather than a wrong 0).
-                    deliveredCount: delivery ? delivery.deliveredCount : null,
-                    // Pre-formatted IST — the raw value is UTC from the bot's
-                    // SQLite, so formatting it in the browser would show the
-                    // wrong wall-clock time to an admin in India.
-                    lastDeliveredAt: delivery
-                        ? repo.formatDeliveryStampIst(delivery.lastDeliveredAt)
-                        : null,
                     tags,
                     // Total shares/companies this user tracks, shown as its
                     // own directory column so an admin can see it without
@@ -513,39 +500,6 @@ async function getUser(req, res) {
                     "Last error": (status && status.lastError) || "—",
                     "Last delivered": (status && status.lastDeliveredAt) || "Never",
                     "WhatsApp window": status && status.windowOpen ? "Open" : "Closed",
-                },
-            });
-
-            // Which announcements this specific user actually received, and
-            // when. Rendered by the dashboard's generic "table" section, so
-            // no frontend change is needed for it. Fails soft to an empty
-            // list when the bot is unreachable (see fetchUserDeliveries).
-            const deliveries = await repo.fetchUserDeliveries(profile.mobile);
-            sections.push({
-                key: "delivery_history",
-                title: `Alerts delivered (${deliveries.length})`,
-                type: "table",
-                data: {
-                    // Times are pre-formatted IST strings from the repository —
-                    // the exchange time and the send time come from databases
-                    // with different timezone conventions, so they're reconciled
-                    // there rather than left for the dashboard to guess at.
-                    columns: [
-                        "Company",
-                        "Announcement",
-                        "Filed on exchange",
-                        "Delivered to user",
-                        "Delay",
-                        "PDF",
-                    ],
-                    rows: deliveries.map((d) => [
-                        d.symbol || "—",
-                        d.title || d.filingKey || "—",
-                        d.filedAtIst || "—",
-                        d.deliveredAtIst || "—",
-                        d.delayText || "—",
-                        d.pdfUrl,
-                    ]),
                 },
             });
         }
