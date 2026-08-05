@@ -469,6 +469,35 @@ def mark_filing_sent(phone: str, filing_id: str):
         conn.close()
 
 
+def get_deliveries_for_phone(phone: str, limit: int = 200) -> list:
+    """
+    Every filing actually delivered to one phone, most recent first — backs
+    the Central Dashboard's per-user "Alerts delivered" view.
+
+    `filing_id` here is the PDF's basename (see db_watcher's
+    `file_key = os.path.basename(file_path)`), NOT the scraper's
+    announcements.id — the caller joins it back to announcement metadata
+    (company, title) via announcements.local_path, since that table lives in
+    a different database entirely.
+
+    The (phone, filing_id) primary key makes this an index scan on phone.
+    """
+    with _lock:
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT filing_id, sent_at
+            FROM sent_filings
+            WHERE phone = ?
+            ORDER BY sent_at DESC
+            LIMIT ?
+            """,
+            (phone, int(limit))
+        ).fetchall()
+        conn.close()
+        return [{"filingKey": r["filing_id"], "sentAt": r["sent_at"]} for r in rows]
+
+
 # ── Sent RESULT periods tracker (symbol+quarter, not per-PDF) ──
 
 def is_result_period_sent(phone: str, symbol: str, period: str) -> bool:
@@ -725,7 +754,9 @@ def get_delivery_status_summary() -> dict:
         """).fetchall()
 
         sent_rows = conn.execute("""
-            SELECT phone, MAX(sent_at) AS last_delivered_at
+            SELECT phone,
+                   MAX(sent_at) AS last_delivered_at,
+                   COUNT(*)     AS delivered_count
             FROM sent_filings
             GROUP BY phone
         """).fetchall()
@@ -746,6 +777,7 @@ def get_delivery_status_summary() -> dict:
             "last_error": None,
             "last_queued_at": None,
             "last_delivered_at": None,
+            "delivered_count": 0,
             "window_open": False,
         })
 
@@ -758,7 +790,9 @@ def get_delivery_status_summary() -> dict:
         _entry(row["phone"])["last_error"] = row["last_error"]
 
     for row in sent_rows:
-        _entry(row["phone"])["last_delivered_at"] = row["last_delivered_at"]
+        e = _entry(row["phone"])
+        e["last_delivered_at"] = row["last_delivered_at"]
+        e["delivered_count"] = row["delivered_count"]
 
     for row in window_rows:
         # Same 24h rule as window_open() above, evaluated in Python since we
