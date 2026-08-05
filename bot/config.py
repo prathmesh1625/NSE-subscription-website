@@ -70,21 +70,6 @@ BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 
 # yields a results table, which is the common case.
 SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 120))
 
-# When the AI summary fails, hold the filing back and re-summarise it on the
-# next poll instead of shipping the degraded "summary isn't available" caption.
-#
-# The LLM errors that cause this are transient and clustered — a 429 during a
-# results-day burst, a timeout — but the old behaviour made them PERMANENT: the
-# filing was delivered with the fallback caption and marked is_notified, and
-# nothing ever revisited it. A two-second blip cost those subscribers a summary
-# for good.
-#
-# Bounded two ways, because a filing that can never be summarised must still go
-# out: an attempt count, and an absolute age ceiling. The age ceiling is what
-# holds after a restart, since the attempt count is per-process.
-SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 3))
-SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 300))
-
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
 SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 6))

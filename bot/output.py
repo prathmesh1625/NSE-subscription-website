@@ -115,14 +115,6 @@ OCR_MAX_PAGES       = int(os.getenv("OCR_MAX_PAGES", "10"))
 # room for them — see the budget note on SUMMARY_TIMEOUT_SEC in config.py.
 OCR_TIME_BUDGET_SEC = int(os.getenv("OCR_TIME_BUDGET_SEC", "25"))
 
-# ── LLM call budget (shared by every provider) ───────────────────────────────
-# Retries are exponentially backed off by the provider SDK, so these ride out a
-# short 429 burst rather than failing the filing. Worst case
-# (LLM_TIMEOUT_SEC * (LLM_MAX_RETRIES + 1)) still has to fit inside
-# config.SUMMARY_TIMEOUT_SEC, which hard-caps the whole summary.
-LLM_TIMEOUT_SEC  = int(os.getenv("LLM_TIMEOUT_SEC", "40"))
-LLM_MAX_RETRIES  = int(os.getenv("LLM_MAX_RETRIES", "5"))
-
 # A page with less real text than this contributes nothing and is a scan.
 _MIN_PAGE_CHARS = 40
 # Below this much usable text in the WHOLE document, treat it as scanned.
@@ -744,44 +736,22 @@ def summarize_content(
     """
     _model = model or PROVIDER_DEFAULTS.get(provider)
 
-    # Build a plain LLM (no structured output / JSON parser).
-    #
-    # Every provider gets the SAME retry/timeout budget. A results-day burst
-    # sends several summaries at once (SUMMARY_WORKERS) and a results filing
-    # alone costs ~20k tokens via extract_financials, which is enough to reach
-    # a 200k TPM account limit — so 429s arrive in clusters, not one at a time.
-    # At the old openai settings (timeout 25, max_retries 1) two attempts a few
-    # seconds apart both landed inside the same rate-limited window and the
-    # filing went out with no summary at all, permanently. The retries are
-    # exponentially backed off by each SDK, so this rides out a short burst.
-    # Well inside config.SUMMARY_TIMEOUT_SEC (120s), which still hard-caps it.
+    # Build a plain LLM (no structured output / JSON parser)
     if provider in ("google", "gemini"):
         from langchain_google_genai import ChatGoogleGenerativeAI
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        # Assigning None to os.environ raises an opaque TypeError; say what is
-        # actually wrong instead.
-        if not api_key:
-            raise ValueError(
-                "SUMMARY_PROVIDER is google/gemini but neither GEMINI_API_KEY "
-                "nor GOOGLE_API_KEY is set."
-            )
         os.environ["GOOGLE_API_KEY"] = api_key
-        llm = ChatGoogleGenerativeAI(model=_model, google_api_key=api_key,
-                                     temperature=0, timeout=LLM_TIMEOUT_SEC,
-                                     max_retries=LLM_MAX_RETRIES)
+        llm = ChatGoogleGenerativeAI(model=_model, google_api_key=api_key, temperature=0)
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        llm = ChatAnthropic(model=_model, temperature=0, max_tokens=512,
-                            timeout=LLM_TIMEOUT_SEC, max_retries=LLM_MAX_RETRIES)
+        llm = ChatAnthropic(model=_model, temperature=0, max_tokens=512)
     elif provider == "openai":
         from langchain_openai import ChatOpenAI
         llm = ChatOpenAI(model=_model, temperature=0, max_tokens=512,
-                         timeout=LLM_TIMEOUT_SEC, max_retries=LLM_MAX_RETRIES)
+                         timeout=25, max_retries=1)
     elif provider == "groq":
         from langchain_groq import ChatGroq
-        llm = ChatGroq(model=_model, groq_api_key=os.getenv("GROQ_API_KEY"),
-                       temperature=0, timeout=LLM_TIMEOUT_SEC,
-                       max_retries=LLM_MAX_RETRIES)
+        llm = ChatGroq(model=_model, groq_api_key=os.getenv("GROQ_API_KEY"), temperature=0)
     else:
         raise ValueError(f"Unsupported provider: '{provider}'")
 
