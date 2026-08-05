@@ -480,6 +480,7 @@ def admin_delivery_status():
                 "lastError": s["last_error"],
                 "lastQueuedAt": s["last_queued_at"],
                 "lastDeliveredAt": s["last_delivered_at"],
+                "deliveredCount": s["delivered_count"],
                 "windowOpen": s["window_open"],
             }
             for phone, s in summary.items()
@@ -566,6 +567,43 @@ def admin_openai_cost_today():
     except Exception as e:
         print(f"❌ /admin/openai-cost-today error: {e}")
         return jsonify({"success": False, "message": "Failed to load OpenAI cost"}), 500
+
+
+@app.route("/admin/user-deliveries", methods=["GET"])
+def admin_user_deliveries():
+    """
+    Which filings were actually delivered to one phone, and when — backs the
+    Central Dashboard's per-user "Alerts delivered" section. Read-only.
+
+    Returns the PDF basename per delivery (`filingKey`); the caller resolves
+    that to company/title against the scraper's announcements table, which
+    lives in a different database than this bot's SQLite.
+    """
+    provided = request.headers.get("x-bot-admin-key", "")
+    expected = config.BOT_ADMIN_KEY
+
+    if not expected:
+        return jsonify({"success": False, "message": "Admin API is not configured on this server"}), 500
+    if not hmac.compare_digest(provided, expected):
+        return jsonify({"success": False, "message": "Invalid or missing x-bot-admin-key header"}), 401
+
+    phone = str(request.args.get("phone") or "").strip()
+    if not phone:
+        return jsonify({"success": False, "message": "phone is required"}), 400
+
+    try:
+        limit = min(500, max(1, int(request.args.get("limit") or 200)))
+    except (TypeError, ValueError):
+        limit = 200
+
+    try:
+        return jsonify({
+            "success": True,
+            "deliveries": db.get_deliveries_for_phone(phone, limit=limit),
+        })
+    except Exception as e:
+        print(f"❌ /admin/user-deliveries error: {e}")
+        return jsonify({"success": False, "message": "Failed to load deliveries"}), 500
 
 
 @app.route("/admin/preview-message", methods=["POST"])
