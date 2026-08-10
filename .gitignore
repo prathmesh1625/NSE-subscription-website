@@ -23,10 +23,3 @@ __pycache__/
 
 # Bot runtime card cache (generated Stock Bits PDFs)
 bot/generated_cards/
-
-# Bot runtime SQLite database — contains real subscriber phone numbers and
-# their delivery history. Must never be committed.
-bot_data.db
-bot/bot_data.db
-*.sqlite
-*.sqlite3

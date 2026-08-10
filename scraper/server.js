@@ -42,24 +42,34 @@ async function safeWatch() {
                 "./scheduler/nseWatcher"
             );
 
+        const bseWatch =
+            require(
+                "./scheduler/bseWatcher"
+            );
+
         const retryFailed =
             require(
                 "./scheduler/recoveryWorker"
             );
 
-        // BSE is no longer scraped here. It moved to the standalone
-        // `bse-scraper` service, which polls far more often than this cycle
-        // can and owns its own download queue — BSE publishes many filings
-        // minutes ahead of NSE, and chaining it to this 20s loop threw that
-        // head start away. See bse-scraper/README.md.
+        console.log(
+            "\n=== NSE + BSE Parallel Cycle ==="
+        );
+
         const startedAt =
             Date.now();
 
-        await nseWatch();
+        await Promise.all([
+
+            nseWatch(),
+
+            bseWatch()
+
+        ]);
 
         console.log(
 
-            `\nNSE completed in ${Date.now() - startedAt
+            `\nNSE + BSE completed in ${Date.now() - startedAt
             } ms`
 
         );
@@ -102,7 +112,7 @@ async function start() {
     );
 
     console.log(
-        "NSE Watcher Started"
+        "NSE + BSE Watcher Started"
     );
 
     // Make sure retry-pipeline columns exist before
@@ -145,7 +155,8 @@ seconds`
 
     console.log(
         [
-            "NSE"
+            "NSE",
+            "BSE"
         ]
     );
 

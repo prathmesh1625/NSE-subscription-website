@@ -135,42 +135,6 @@ services:
       bot:
         condition: service_started
 
-  # Standalone BSE scraper. Deliberately a separate service from `scraper`:
-  # BSE disseminates a large share of filings minutes before NSE does, and the
-  # only way to keep that head start is to poll on its own tight loop with its
-  # own download queue, independent of the NSE cycle and its backlog.
-  bse-scraper:
-    build:
-      context: .
-      dockerfile: bse-scraper/Dockerfile
-    container_name: nse_bse_scraper
-    restart: always
-    environment:
-      - DB_HOST=db
-      - DB_PORT=5432
-      # Writes into the SAME announcements table the bot reads. Only its job
-      # queues (bse_download_jobs / bse_failed_jobs) are private to it.
-      - DB_NAME=nse_ingestion
-      - SUB_DB_NAME=nse_subscription
-      - DB_USER=${DB_USER:-postgres}
-      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in the environment}
-      # Like the NSE scraper, fully subscription-driven — it only scrapes
-      # companies that currently have >=1 active subscription.
-      - BSE_INTERVAL=${BSE_POLL_INTERVAL_MS:-8000}
-      - BSE_MAX_PAGES=${BSE_MAX_PAGES:-6}
-      - BSE_REQUEST_LIMIT=${BSE_REQUEST_LIMIT:-4}
-      - BSE_DOWNLOAD_CONCURRENCY=${BSE_DOWNLOAD_CONCURRENCY:-8}
-      - BSE_DOWNLOAD_BATCH=${BSE_DOWNLOAD_BATCH:-20}
-      - BSE_MAX_DOWNLOAD_RETRIES=${BSE_MAX_DOWNLOAD_RETRIES:-8}
-      - PDF_STORAGE_PATH=/app/storage/pdf
-    volumes:
-      - shared_storage:/app/storage
-    depends_on:
-      db:
-        condition: service_healthy
-      bot:
-        condition: service_started
-
   adminer:
     image: adminer
     container_name: nse_adminer

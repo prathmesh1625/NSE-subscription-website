@@ -50,18 +50,10 @@ def ensure_schema():
             ALTER TABLE announcements
             ADD COLUMN IF NOT EXISTS is_notified BOOLEAN DEFAULT FALSE
         """)
-        # Which scraper produced the row ('BSE', or NULL for the NSE scraper,
-        # which does not stamp it). Added here as well as in the BSE scraper so
-        # the bot can be started against a database that scraper has never
-        # touched. Reported only — delivery never depends on it.
-        cur.execute("""
-            ALTER TABLE announcements
-            ADD COLUMN IF NOT EXISTS exchange VARCHAR(8)
-        """)
         conn.commit()
         cur.close()
         conn.close()
-        print("✅ announcements.is_notified / exchange columns ready.")
+        print("✅ announcements.is_notified column ready.")
     except Exception as e:
         print(f"❌ Schema migration error: {e}")
 
@@ -94,7 +86,6 @@ def fetch_new_filings():
                 {config.COL_FILE_PATH}      AS file_path,
                 {config.COL_FILING_TYPE}    AS filing_type,
                 pdf_url                     AS pdf_url,
-                COALESCE(exchange, 'NSE')   AS exchange,
                 {config.COL_CREATED_AT}     AS created_at,
                 EXTRACT(EPOCH FROM (NOW() - created_at))::int AS age_seconds
             FROM {config.FILINGS_TABLE}
@@ -968,39 +959,6 @@ def _result_period_key(caption: str) -> str:
     return period.lower()
 
 
-_FLATTEN_TITLE = re.compile(r"[^a-z0-9]+")
-_BSE_SUBJECT_PREFIX = re.compile(r"^.*?\s-\s\d{4,7}\s-\s")
-
-
-def _cross_exchange_key(symbol: str, filing_type: str) -> str:
-    """
-    Stable identity for "this document", independent of which exchange
-    published it.
-
-    The same filing reaches us twice — once from the NSE scraper and once from
-    the standalone BSE scraper — as two unrelated rows with different pdf_urls,
-    so neither the upstream pdf_url constraint nor sent_filings can tell they
-    are one document. What they do share is the subject line, modulo BSE's
-    Title Casing, doubled apostrophes and "<Company> - <scrip code> - " prefix.
-    Flattening to symbol + alphanumerics makes the two copies collide.
-
-    Returns "" when the subject is too short to identify anything (a bare
-    "AGM"), which disables suppression for that filing rather than risking a
-    false match.
-    """
-    symbol = (symbol or "").upper().strip()
-    title = (filing_type or "").strip()
-    if not symbol or not title:
-        return ""
-
-    title = _BSE_SUBJECT_PREFIX.sub("", title)
-    flat = _FLATTEN_TITLE.sub("", title.lower())
-    if len(flat) < 12:
-        return ""
-
-    return f"{symbol}|{flat}"
-
-
 def _parse_stock_bits_parts(caption: str):
     """
     Split an assembled caption into its dynamic pieces for the SPACED template:
@@ -1457,7 +1415,6 @@ def process_new_filings():
             "file_path":    file_path,
             "filing_type":  filing_type,
             "download_url": filing.get("pdf_url") or "",
-            "exchange":     filing.get("exchange") or "NSE",
             "raw_time":     filing.get("created_at"),
             "age_seconds":  filing.get("age_seconds"),
             "subscribers":  subscribers,
@@ -1509,8 +1466,7 @@ def process_new_filings():
 
         age = j.get("age_seconds")
         age_note = f" [saved {age}s ago by scraper]" if age is not None else ""
-        print(f"📤 Sending {j['symbol']} '{j['filing_type']}' via {j['exchange']} "
-              f"to {len(j['subscribers'])} subscriber(s)...{age_note}")
+        print(f"📤 Sending {j['symbol']} '{j['filing_type']}' to {len(j['subscribers'])} subscriber(s)...{age_note}")
 
         # NSE/BSE often file several PDFs for one results event (standalone +
         # consolidated + investor presentation, corrigenda, ...), each a
@@ -1519,11 +1475,6 @@ def process_new_filings():
         # must not get one alert per PDF — cap it to one per symbol+period.
         # period_key == "" for non-results filings, which skips this entirely.
         period_key = _result_period_key(caption) if _is_result_caption(caption) else ""
-
-        # NSE and BSE both publish the same document. Whichever exchange we
-        # ingested FIRST is the one that gets delivered — usually BSE, which is
-        # exactly why it is scraped on its own tighter loop.
-        exchange_key = _cross_exchange_key(j["symbol"], j["filing_type"])
 
         all_sent = True
         for phone in j["subscribers"]:
@@ -1535,22 +1486,11 @@ def process_new_filings():
                       f"(different filing PDF) — skipping duplicate.")
                 bot_db.mark_filing_sent(phone, j["file_key"])
                 continue
-            if exchange_key and bot_db.is_cross_exchange_sent(
-                phone, exchange_key, j["raw_time"]
-            ):
-                print(f"ℹ️  {j['symbol']} '{j['filing_type']}' already delivered to "
-                      f"{phone} from the other exchange — skipping duplicate.")
-                bot_db.mark_filing_sent(phone, j["file_key"])
-                continue
             # Only marks sent on confirmed success; queues on failure.
             ok = _try_send(phone, j["file_path"], caption, j["file_key"],
                            filing_id=j["filing_id"], template_params=[j["company"]])
             if ok and period_key:
                 bot_db.mark_result_period_sent(phone, j["symbol"], period_key)
-            if ok and exchange_key:
-                bot_db.mark_cross_exchange_sent(
-                    phone, exchange_key, j.get("exchange") or "", j["raw_time"]
-                )
             if not ok:
                 all_sent = False
 
@@ -1610,8 +1550,7 @@ def deliver_backfill_for_subscribers():
                 symbol = symbol.upper().strip()
                 name = config.COMPANY_LIST.get(symbol, db_company_name or symbol)
                 pg_cur.execute("""
-                    SELECT id, title, local_path, pdf_url, announcement_time,
-                           COALESCE(exchange, 'NSE') AS exchange
+                    SELECT id, title, local_path, pdf_url, announcement_time
                     FROM announcements
                     WHERE UPPER(company_symbol) = UPPER(%s)
                       AND download_status = 'DOWNLOADED'
@@ -1647,27 +1586,11 @@ def deliver_backfill_for_subscribers():
                         bot_db.mark_filing_sent(phone, file_key)
                         continue
 
-                    # The backfill window spans both feeds, so it can hold the
-                    # NSE and BSE copies of one document — a brand-new
-                    # subscriber must not be welcomed with each filing twice.
-                    filed_at = row["announcement_time"]
-                    exchange_key = _cross_exchange_key(symbol, row.get("title") or "")
-                    if exchange_key and bot_db.is_cross_exchange_sent(
-                        phone, exchange_key, filed_at
-                    ):
-                        bot_db.mark_filing_sent(phone, file_key)
-                        continue
-
                     # Only marks sent on confirmed success; queues on failure.
                     if _try_send(phone, file_path, caption, file_key,
                                  filing_id=row["id"], template_params=[name]):
                         if period_key:
                             bot_db.mark_result_period_sent(phone, symbol, period_key)
-                        if exchange_key:
-                            bot_db.mark_cross_exchange_sent(
-                                phone, exchange_key,
-                                row.get("exchange") or "", filed_at
-                            )
                         print(f"✅ Auto-delivered {file_key} to {phone}")
 
         pg_cur.close()
