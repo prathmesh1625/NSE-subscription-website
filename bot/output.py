@@ -65,6 +65,14 @@ class FinancialSummary(BaseModel):
     """Complete structured output for one quarterly result."""
     company_name: str = Field(description="Full company name")
     reporting_period: str = Field(description="E.g. 'Mar 2026'")
+    basis: str = Field(
+        default="",
+        description=(
+            "Which statement the metrics were copied from: 'consolidated' when "
+            "the group/total table was used, 'standalone' when the filing has "
+            "only a standalone statement. Empty if it cannot be determined."
+        ),
+    )
     metrics: list[MetricBlock] = Field(description="List of key financial metrics extracted")
     insights_url: str = Field(
         default="",
@@ -345,6 +353,33 @@ def download_pdf(url: str) -> str:
 SYSTEM_PROMPT = """You are a financial analyst AI that extracts structured data
 from quarterly investor presentation PDFs of Indian listed companies.
 
+WHICH STATEMENT TO READ — DO THIS BEFORE ANYTHING ELSE.
+A single Indian results filing usually contains TWO complete results tables:
+a STANDALONE statement (the parent company alone) and a CONSOLIDATED statement
+(the parent PLUS all its subsidiaries — the group TOTAL). The standalone table
+is almost always printed FIRST, so the first table you meet is typically the
+WRONG one to report.
+
+  - If the document contains a CONSOLIDATED statement, extract EVERY metric
+    from the CONSOLIDATED table and set basis = "consolidated".
+  - Use the STANDALONE table ONLY when the document has no consolidated
+    statement at all (common for companies with no subsidiaries), and then set
+    basis = "standalone".
+  - NEVER mix the two. Every number in your output must come from the SAME
+    statement — a revenue taken from the consolidated table alongside a profit
+    taken from the standalone table is a serious error.
+  - A consolidated table that is present but carries no figures (blank, "NA",
+    "Not Applicable", or a note that consolidated results are not applicable)
+    does NOT count — fall back to standalone and set basis = "standalone".
+
+Recognise the consolidated table by its OWN heading — "Consolidated Statement
+of Standalone and Consolidated Financial Results", "Consolidated Financial
+Results", "Statement of Consolidated Results", or a column group headed
+"Consolidated" — and not by its position in the document. Some filings place
+the two side by side as column groups under one heading ("STANDALONE" columns
+then "CONSOLIDATED" columns); there, read the CONSOLIDATED column group and
+be careful to take the period columns from that group only.
+
 Your task:
 1. Identify the company name and reporting quarter/year.
 2. Extract the following metrics (if present) for THREE periods:
@@ -505,10 +540,14 @@ def extract_financials(
 
     # Limit text size to prevent exceeding context or free rate limits (e.g. Groq TPM is small)
     max_chars = 20000 if provider == "groq" else 80000
-    
+
+    # We report the CONSOLIDATED (group) statement, but filings print the
+    # standalone one first — on a long filing the consolidated table would be
+    # cut off by max_chars below and the model would have nothing but
+    # standalone to read. Move it to the front so it survives the cap.
     result = chain.invoke({
         "schema":   schema_str,
-        "pdf_text": pdf_text[:max_chars],   # stay within context limits
+        "pdf_text": consolidated_first(pdf_text)[:max_chars],
     })
 
     if isinstance(result, dict):
@@ -677,6 +716,24 @@ def _metric_label(name: str, short: str) -> str:
     return f"{name} ({short}):" if short else f"{name}:"
 
 
+def _basis_suffix(basis: str) -> str:
+    """
+    " (Consolidated)" / " (Standalone)" for the company line, "" when the
+    extraction couldn't tell which statement it read.
+
+    This rides in the COMPANY slot, BEFORE the "|", on purpose. The results
+    template's period-dedup key is everything AFTER the "|"
+    (db_watcher._result_period_key), and NSE/BSE publish the standalone and
+    consolidated statements of one quarter as separate filings — putting the
+    basis after the "|" would give them different period keys and send a
+    subscriber two alerts for the same quarter.
+    """
+    b = (basis or "").strip().lower()
+    if b.startswith("consolidat"):  return " (Consolidated)"
+    if b.startswith("standalone"):  return " (Standalone)"
+    return ""
+
+
 def format_whatsapp_message(
     summary: FinancialSummary,
     equisense_url: str = "https://equityalerts.in/portal",
@@ -705,7 +762,10 @@ def format_whatsapp_message(
         You are receiving ...
     """
     lines = [f"📢 *{BRAND_NAME} Result Bits!!*", ""]
-    lines.append(f"💼 {summary.company_name} | {summary.reporting_period} Results Out")
+    lines.append(
+        f"💼 {summary.company_name}{_basis_suffix(summary.basis)} "
+        f"| {summary.reporting_period} Results Out"
+    )
     lines.append("")
     lines.append("📊 Key Metrics")
     for m in summary.metrics:
@@ -951,6 +1011,162 @@ def looks_like_financial_results(pdf_text: str) -> bool:
     keyword_hits = count_metric_terms(pdf_text)
     money_count  = len(_MONEY_RE.findall(pdf_text))
     return (has_phrase or has_dated_columns) and keyword_hits >= 2 and money_count >= 12
+
+
+# A heading that introduces the CONSOLIDATED results statement, e.g.
+# "STATEMENT OF UNAUDITED CONSOLIDATED FINANCIAL RESULTS FOR THE QUARTER ENDED".
+# Anchored on a heading-shaped line (short, names both "consolidated" and
+# "results") so the many passing mentions in the NOTES below a table — "the
+# consolidated financial results include the results of ..." — don't win.
+_CONSOL_HEADING_RE = re.compile(
+    r"(?im)^[^\n]{0,160}?\bconsolidated\b[^\n]{0,80}?\bresults?\b[^\n]{0,80}$"
+)
+
+# The same, for the standalone statement — used only to bound the consolidated
+# section when standalone happens to be printed after it.
+_STANDALONE_HEADING_RE = re.compile(
+    r"(?im)^[^\n]{0,160}?\bstandalone\b[^\n]{0,80}?\bresults?\b[^\n]{0,80}$"
+)
+
+
+def _consolidated_heading_pos(pdf_text: str) -> int | None:
+    """
+    Character offset of the CONSOLIDATED results heading, or None when the
+    document has no consolidated statement (a company with no subsidiaries).
+
+    A combined heading ("Statement of Standalone and Consolidated Financial
+    Results") names both and matches here too — correctly, since such a
+    document does carry consolidated columns.
+    """
+    for m in _CONSOL_HEADING_RE.finditer(pdf_text or ""):
+        line = m.group(0)
+        # "Consolidated" inside a sentence is prose from the notes, not a
+        # heading. Real headings don't run on into a full sentence.
+        if line.rstrip().endswith("."):
+            continue
+        return m.start()
+    return None
+
+
+def has_consolidated_statement(pdf_text: str) -> bool:
+    """True when the filing carries a consolidated (group) results statement."""
+    return _consolidated_heading_pos(pdf_text) is not None
+
+
+def consolidated_first(pdf_text: str) -> str:
+    """
+    The same text with the CONSOLIDATED statement moved to the front.
+
+    Indian filings print the STANDALONE statement first, so on a long filing
+    the consolidated table can sit past extract_financials' character cap and
+    never reach the model at all — which no prompt wording can fix, because
+    the table simply isn't in the window. Nothing is dropped here, only
+    reordered, so every number the model may cite is still present for
+    verify_metrics_against_text to check afterwards.
+
+    Returns the text unchanged when there is no consolidated statement, or
+    when it already comes first.
+    """
+    start = _consolidated_heading_pos(pdf_text)
+    if not start:                      # None (absent) or 0 (already first)
+        return pdf_text
+    return pdf_text[start:] + "\n\n" + pdf_text[:start]
+
+
+def reconcile_basis(summary: "FinancialSummary", pdf_text: str) -> str:
+    """
+    Settle which statement the metrics actually came from, and never let the
+    alert claim more than we can show.
+
+    The model self-reports `basis`, and it is exactly the field it has the
+    least reason to get right — so it is checked, not trusted:
+
+      - No consolidated statement in the document → the numbers can only be
+        standalone, whatever the model said.
+      - The document HAS one → decide by WHERE the headline revenue figure
+        appears. Found only inside the consolidated section → consolidated;
+        only inside the standalone section → standalone, even if the model
+        claimed otherwise. Found in both (the statements agree on that line)
+        or in neither, the position proves nothing, so the model's claim
+        stands only when it is "consolidated" — the basis we asked for.
+      - Both statements share one region (the combined column-group layout)
+        → undetermined, since no figure can be attributed by position.
+
+    Returns the settled basis; "" means undetermined, and _basis_suffix then
+    prints no label at all rather than a wrong one.
+    """
+    claimed = (summary.basis or "").strip().lower()
+    consol_start = _consolidated_heading_pos(pdf_text)
+
+    if consol_start is None:
+        summary.basis = "standalone" if summary.metrics else ""
+        return summary.basis
+
+    # Text belonging to the standalone statement: everything before the
+    # consolidated heading (plus any standalone section printed after it).
+    #
+    # The search for that trailing standalone section starts past the END of
+    # the consolidated heading line, and ignores any heading that names
+    # "consolidated" as well. A COMBINED heading ("Statement of Standalone and
+    # Consolidated Financial Results", the layout where the two appear as
+    # column groups of ONE table) matches both patterns at the same offset —
+    # taking it as the start of a standalone section collapsed the
+    # consolidated region to the empty string, and every consolidated figure
+    # then looked standalone.
+    text = pdf_text or ""
+    line_end = text.find("\n", consol_start)
+    scan_from = line_end + 1 if line_end != -1 else len(text)
+    sa_start = None
+    for sa in _STANDALONE_HEADING_RE.finditer(text, scan_from):
+        if "consolidated" in sa.group(0).lower():
+            continue
+        sa_start = sa.start()
+        break
+
+    standalone_region = text[:consol_start]
+    if sa_start is not None:
+        standalone_region += text[sa_start:]
+    consol_region = text[consol_start:sa_start]
+
+    # Combined layout: ONE table whose columns are grouped "STANDALONE" then
+    # "CONSOLIDATED", under a single heading naming both, with no separate
+    # standalone statement anywhere. Both column groups sit in the SAME text
+    # region, so matching a figure to a region proves nothing about which
+    # group it came from — every standalone figure would "verify" as
+    # consolidated. Report undetermined and let _basis_suffix print no label,
+    # rather than stamp a confident wrong one on the alert.
+    heading_line = text[consol_start:line_end if line_end != -1 else None]
+    if sa_start is None and "standalone" in heading_line.lower():
+        summary.basis = ""
+        return summary.basis
+
+    rev = next((m for m in summary.metrics
+                if (m.short_name or "").upper() == "REV"), None)
+    rev = rev or (summary.metrics[0] if summary.metrics else None)
+    if rev is None:
+        summary.basis = ""
+        return summary.basis
+
+    head = next((p.value for p in rev.periods if p.value), "")
+    num  = re.search(r"-?\d[\d,]*\.?\d*", head or "")
+    if not num:
+        summary.basis = claimed if claimed.startswith("consolidat") else ""
+        return summary.basis
+
+    core = num.group(0).replace(",", "").lstrip("-").rstrip(".")
+    in_consol     = core in re.sub(r"[,\s]", "", consol_region)
+    in_standalone = core in re.sub(r"[,\s]", "", standalone_region)
+
+    if in_consol and not in_standalone:
+        summary.basis = "consolidated"
+    elif in_standalone and not in_consol:
+        summary.basis = "standalone"
+    else:
+        # Present in both (the two statements agree on this line) or in
+        # neither — nothing here distinguishes them, so keep the model's own
+        # claim only when it is the one we asked for.
+        summary.basis = "consolidated" if claimed.startswith("consolidat") else ""
+    return summary.basis
 
 
 def verify_metrics_against_text(summary: "FinancialSummary", pdf_text: str) -> int:
@@ -1611,6 +1827,14 @@ def process_pdf(
             #     crore and would then no longer match the source text.
             verified = verify_metrics_against_text(summary, pdf_text)
             print(f"      Kept {verified} metric(s) verified against source text.", file=sys.stderr)
+            #  1b. basis: settle standalone vs consolidated and correct the
+            #     model's own claim. Must run BEFORE the unit steps below —
+            #     it matches the extracted figure against the source text, and
+            #     those steps rewrite values into Cr, after which nothing would
+            #     match the document any more (same reason as step 1).
+            basis = reconcile_basis(summary, pdf_text)
+            print(f"      Statement basis: {basis or 'undetermined'}"
+                  f"{'' if basis else ' (no label will be shown)'}.", file=sys.stderr)
             #  2. reconcile: fix figures transcribed off a lakhs/millions table
             #     but labelled "Cr" (the 100x error class).
             doc_scale = detect_document_scale(pdf_text)
