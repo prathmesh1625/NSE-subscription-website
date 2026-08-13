@@ -1001,6 +1001,83 @@ def _cross_exchange_key(symbol: str, filing_type: str) -> str:
     return f"{symbol}|{flat}"
 
 
+# Minimum extracted characters before a fingerprint is trusted. A near-empty
+# text layer (a scan) would otherwise hash a handful of stray glyphs and
+# collide with every other scan from the same company.
+_FINGERPRINT_MIN_CHARS = 400
+
+# file_path -> fingerprint. The backfill loop reaches the same PDF once per
+# subscriber, and re-parsing it each time would multiply the cost by the
+# subscriber count for no gain.
+_FINGERPRINT_CACHE: dict[str, str] = {}
+
+
+def _document_fingerprint(file_path: str) -> str:
+    """
+    A hash of the PDF's own text, identifying the DOCUMENT rather than the
+    words an exchange chose to file it under. "" when it can't be computed.
+
+    The subject line cannot carry this job. NSE and BSE describe one filing
+    from their own taxonomies — the JINDALSTEL analyst-meet intimation of
+    2026-08-13 arrived as "Analysts/Institutional Investor Meet/Con. Call
+    Updates" from NSE and "Announcement under Regulation 30 (LODR)-Analyst /
+    Investor Meet - Intimation" from BSE. Those share two tokens out of
+    fourteen; a threshold loose enough to unite them also unites filings that
+    are genuinely different, so no amount of fuzzy matching on the subject
+    separates the two cases. The documents behind them are the same document.
+
+    Uses the pypdf text layer ONLY — no pdfplumber fallback, no OCR. This runs
+    in the delivery path where latency is the whole point of the BSE fast loop,
+    and a filing whose text layer is unusable simply gets no fingerprint and
+    falls back to subject matching, exactly as before.
+    """
+    if not file_path:
+        return ""
+    if file_path in _FINGERPRINT_CACHE:
+        return _FINGERPRINT_CACHE[file_path]
+
+    fingerprint = ""
+    try:
+        import output
+        pages = output._extract_pages_pypdf(file_path)
+        if pages:
+            flat = _FLATTEN_TITLE.sub("", "".join(pages).lower())
+            if len(flat) >= _FINGERPRINT_MIN_CHARS:
+                fingerprint = hashlib.sha1(flat.encode("utf-8")).hexdigest()[:16]
+    except Exception as e:
+        print(f"⚠️  fingerprint failed for {os.path.basename(file_path)}: {e}")
+
+    _FINGERPRINT_CACHE[file_path] = fingerprint
+    return fingerprint
+
+
+def _dedup_keys(symbol: str, filing_type: str, file_path: str) -> list:
+    """
+    Every key under which this filing may already have been delivered, best
+    evidence first.
+
+    Two independent identities, because each covers the other's blind spot:
+
+      fp:  the document's own text. Unites the same filing across exchanges
+           however differently they title it, and — unlike a looser subject
+           match — never unites two filings that merely sound alike.
+      subject: the historical key. Still needed for filings whose text layer
+           is a scan, where no fingerprint can be computed.
+
+    A hit on EITHER suppresses, and BOTH are recorded on a successful send.
+    Adding the fingerprint can only suppress more than before, never less:
+    the subject key still fires exactly where it fired previously.
+    """
+    keys = []
+    fingerprint = _document_fingerprint(file_path)
+    if fingerprint:
+        keys.append(f"{(symbol or '').upper().strip()}|fp:{fingerprint}")
+    subject_key = _cross_exchange_key(symbol, filing_type)
+    if subject_key:
+        keys.append(subject_key)
+    return keys
+
+
 def _parse_stock_bits_parts(caption: str):
     """
     Split an assembled caption into its dynamic pieces for the SPACED template:
@@ -1523,11 +1600,11 @@ def process_new_filings():
         # NSE and BSE both publish the same document. Whichever exchange we
         # ingested FIRST is the one that gets delivered — usually BSE, which is
         # exactly why it is scraped on its own tighter loop.
-        exchange_key = _cross_exchange_key(j["symbol"], j["filing_type"])
+        exchange_keys = _dedup_keys(j["symbol"], j["filing_type"], j["file_path"])
         # See the matching diagnostic in deliver_backfill_for_subscribers —
-        # a duplicate can arrive through either path, so both log the key.
+        # a duplicate can arrive through either path, so both log the keys.
         print(f"🔑 {j['symbol']} [{j.get('exchange') or '?'}] "
-              f"title={j['filing_type']!r} key={exchange_key or '(empty)'}")
+              f"title={j['filing_type']!r} keys={exchange_keys or '(none)'}")
 
         all_sent = True
         for phone in j["subscribers"]:
@@ -1539,11 +1616,12 @@ def process_new_filings():
                       f"(different filing PDF) — skipping duplicate.")
                 bot_db.mark_filing_sent(phone, j["file_key"])
                 continue
-            if exchange_key and bot_db.is_cross_exchange_sent(
-                phone, exchange_key, j["raw_time"]
-            ):
+            hit = next((k for k in exchange_keys
+                        if bot_db.is_cross_exchange_sent(phone, k, j["raw_time"])), None)
+            if hit:
                 print(f"ℹ️  {j['symbol']} '{j['filing_type']}' already delivered to "
-                      f"{phone} from the other exchange — skipping duplicate.")
+                      f"{phone} from the other exchange — skipping duplicate "
+                      f"(matched {hit}).")
                 bot_db.mark_filing_sent(phone, j["file_key"])
                 continue
             # Only marks sent on confirmed success; queues on failure.
@@ -1551,10 +1629,11 @@ def process_new_filings():
                            filing_id=j["filing_id"], template_params=[j["company"]])
             if ok and period_key:
                 bot_db.mark_result_period_sent(phone, j["symbol"], period_key)
-            if ok and exchange_key:
-                bot_db.mark_cross_exchange_sent(
-                    phone, exchange_key, j.get("exchange") or "", j["raw_time"]
-                )
+            if ok:
+                for k in exchange_keys:
+                    bot_db.mark_cross_exchange_sent(
+                        phone, k, j.get("exchange") or "", j["raw_time"]
+                    )
             if not ok:
                 all_sent = False
 
@@ -1655,19 +1734,21 @@ def deliver_backfill_for_subscribers():
                     # NSE and BSE copies of one document — a brand-new
                     # subscriber must not be welcomed with each filing twice.
                     filed_at = row["announcement_time"]
-                    exchange_key = _cross_exchange_key(symbol, row.get("title") or "")
-                    # Diagnostic: the cross-exchange key only suppresses a
-                    # duplicate when BOTH exchanges word the subject the same
-                    # way, and NSE/BSE do not always agree (an analyst-meet
-                    # intimation reached subscribers twice on 2026-08-13 with
-                    # this dedup live). Log what each copy actually hashes to,
-                    # so a mismatch is visible in the deployment logs instead
-                    # of needing DB access to diagnose.
+                    exchange_keys = _dedup_keys(symbol, row.get("title") or "",
+                                                file_path)
+                    # Log what each copy identifies as, so a miss stays
+                    # diagnosable from the deployment logs alone — no DB
+                    # access needed. This is how the subject-only key was
+                    # caught failing on 2026-08-13.
                     print(f"🔑 {symbol} [{row.get('exchange') or '?'}] "
-                          f"title={(row.get('title') or '')!r} key={exchange_key or '(empty)'}")
-                    if exchange_key and bot_db.is_cross_exchange_sent(
-                        phone, exchange_key, filed_at
-                    ):
+                          f"title={(row.get('title') or '')!r} "
+                          f"keys={exchange_keys or '(none)'}")
+                    hit = next((k for k in exchange_keys
+                                if bot_db.is_cross_exchange_sent(phone, k, filed_at)),
+                               None)
+                    if hit:
+                        print(f"ℹ️  {symbol} already delivered to {phone} from the "
+                              f"other exchange — skipping duplicate (matched {hit}).")
                         bot_db.mark_filing_sent(phone, file_key)
                         continue
 
@@ -1676,9 +1757,9 @@ def deliver_backfill_for_subscribers():
                                  filing_id=row["id"], template_params=[name]):
                         if period_key:
                             bot_db.mark_result_period_sent(phone, symbol, period_key)
-                        if exchange_key:
+                        for k in exchange_keys:
                             bot_db.mark_cross_exchange_sent(
-                                phone, exchange_key,
+                                phone, k,
                                 row.get("exchange") or "", filed_at
                             )
                         print(f"✅ Auto-delivered {file_key} to {phone}")
