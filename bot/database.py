@@ -9,6 +9,7 @@
 # ============================================================
 import sqlite3
 import threading
+from datetime import datetime
 
 import os
 BOT_DB_PATH = os.environ.get("BOT_DB_PATH", "bot_data.db")
@@ -200,6 +201,29 @@ def init_db():
                 period  TEXT,
                 sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (phone, symbol, period)
+            )
+        """)
+
+        # Cross-exchange duplicate suppression. The same filing is published on
+        # BOTH NSE and BSE with different attachment URLs, so it arrives as two
+        # unrelated rows upstream and neither pdf_url dedup nor the per-filing
+        # sent_filings table can tell they are the same document. This tracks a
+        # normalised symbol+subject key per phone, so whichever exchange lands
+        # FIRST wins — which is the point of scraping BSE separately, since BSE
+        # is usually the early one.
+        #
+        # sent_at is checked against a rolling window rather than kept forever:
+        # recurring subjects ("Trading Window Closure", "Board Meeting
+        # Intimation") legitimately repeat every quarter and must not be
+        # suppressed months later.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sent_exchange_filings (
+                phone      TEXT,
+                dedup_key  TEXT,
+                exchange   TEXT,
+                filed_at   TEXT,
+                sent_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (phone, dedup_key)
             )
         """)
 
@@ -524,6 +548,86 @@ def mark_result_period_sent(phone: str, symbol: str, period: str):
         conn.execute(
             "INSERT OR IGNORE INTO sent_result_periods (phone, symbol, period) VALUES (?, ?, ?)",
             (phone, symbol, period)
+        )
+        conn.commit()
+        conn.close()
+
+
+# ── Cross-exchange duplicate tracker (same filing on NSE + BSE) ──
+
+# A cross-exchange copy of the same document shows up within minutes. Two
+# genuinely different filings that happen to share a subject line (a company
+# filing "Announcement under Regulation 30 (LODR)" twice in one day about
+# unrelated things) are hours apart. Matching on the subject ALONE would
+# swallow the second one, so proximity in filing time is required too.
+CROSS_EXCHANGE_NEAR_MINUTES = 90
+
+
+def _parse_filed_at(value):
+    """Best-effort parse of an announcement timestamp into a datetime."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip().replace("T", " ")
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(text[:26], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def is_cross_exchange_sent(phone: str, dedup_key: str, filed_at=None) -> bool:
+    """True if this phone already received this same filing from the other
+    exchange, judged by matching subject AND a filing time close enough that it
+    must be the same document."""
+    if not dedup_key:
+        return False
+    with _lock:
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT exchange, filed_at FROM sent_exchange_filings "
+            "WHERE phone=? AND dedup_key=?",
+            (phone, dedup_key)
+        ).fetchone()
+        conn.close()
+
+    if row is None:
+        return False
+
+    incoming = _parse_filed_at(filed_at)
+    previous = _parse_filed_at(row["filed_at"])
+
+    # No usable timestamp on either side — fall back to subject-only matching
+    # rather than letting a duplicate through.
+    if incoming is None or previous is None:
+        return True
+
+    gap_minutes = abs((incoming - previous).total_seconds()) / 60.0
+    return gap_minutes <= CROSS_EXCHANGE_NEAR_MINUTES
+
+
+def mark_cross_exchange_sent(phone: str, dedup_key: str, exchange: str = "",
+                             filed_at=None):
+    """Record that this phone received this filing, from whichever exchange got
+    there first. REPLACE (not IGNORE) so a later genuine filing with the same
+    subject becomes the new reference point instead of being compared forever
+    against a stale one."""
+    if not dedup_key:
+        return
+    with _lock:
+        conn = get_conn()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO sent_exchange_filings
+                (phone, dedup_key, exchange, filed_at, sent_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (phone, dedup_key, exchange or "",
+             str(filed_at) if filed_at is not None else None)
         )
         conn.commit()
         conn.close()
