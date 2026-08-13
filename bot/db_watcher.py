@@ -1524,6 +1524,10 @@ def process_new_filings():
         # ingested FIRST is the one that gets delivered — usually BSE, which is
         # exactly why it is scraped on its own tighter loop.
         exchange_key = _cross_exchange_key(j["symbol"], j["filing_type"])
+        # See the matching diagnostic in deliver_backfill_for_subscribers —
+        # a duplicate can arrive through either path, so both log the key.
+        print(f"🔑 {j['symbol']} [{j.get('exchange') or '?'}] "
+              f"title={j['filing_type']!r} key={exchange_key or '(empty)'}")
 
         all_sent = True
         for phone in j["subscribers"]:
@@ -1652,6 +1656,15 @@ def deliver_backfill_for_subscribers():
                     # subscriber must not be welcomed with each filing twice.
                     filed_at = row["announcement_time"]
                     exchange_key = _cross_exchange_key(symbol, row.get("title") or "")
+                    # Diagnostic: the cross-exchange key only suppresses a
+                    # duplicate when BOTH exchanges word the subject the same
+                    # way, and NSE/BSE do not always agree (an analyst-meet
+                    # intimation reached subscribers twice on 2026-08-13 with
+                    # this dedup live). Log what each copy actually hashes to,
+                    # so a mismatch is visible in the deployment logs instead
+                    # of needing DB access to diagnose.
+                    print(f"🔑 {symbol} [{row.get('exchange') or '?'}] "
+                          f"title={(row.get('title') or '')!r} key={exchange_key or '(empty)'}")
                     if exchange_key and bot_db.is_cross_exchange_sent(
                         phone, exchange_key, filed_at
                     ):
