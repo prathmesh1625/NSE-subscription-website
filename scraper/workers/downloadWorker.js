@@ -104,6 +104,20 @@ ${delay}ms`
 
                     );
 
+                    // FIX #2: Notify Python bot immediately via PostgreSQL NOTIFY
+                    // Bot wakes within ~100ms instead of waiting for next poll
+                    // 
+                    // ORDERING GUARANTEE: pg.Pool autocommits each query. The UPDATE above
+                    // commits before this NOTIFY executes, ensuring the bot never receives
+                    // a notification before the DOWNLOADED state is visible.
+                    try {
+                        const db = require("../db/connection");
+                        await db.query("SELECT pg_notify('new_filing', $1)", [job.url]);
+                    } catch (notifyErr) {
+                        // Non-fatal — bot has POLL_INTERVAL_SEC fallback poll as safety net
+                        console.log(`⚠️  pg_notify failed (non-fatal): ${notifyErr.message}`);
+                    }
+
                     await queueRepo.markDone(
                         job.id
                     );
