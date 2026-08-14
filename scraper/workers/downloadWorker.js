@@ -104,6 +104,19 @@ ${delay}ms`
 
                     );
 
+                    // Fix #2: Notify Python bot immediately (no 15s polling delay)
+                    // SAFETY: Non-blocking, non-fatal if it fails
+                    try {
+                        const db = require("../db/connection");
+                        await db.query(
+                            "SELECT pg_notify('new_filing', $1::text)",
+                            [String(job.url)]
+                        );
+                    } catch (notifyErr) {
+                        // Non-fatal — bot will catch it on 30s timeout fallback
+                        console.log(`⚠️  pg_notify failed (non-fatal): ${notifyErr.message}`);
+                    }
+
                     await queueRepo.markDone(
                         job.id
                     );
