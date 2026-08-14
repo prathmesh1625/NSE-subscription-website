@@ -1606,42 +1606,66 @@ def process_new_filings():
         print(f"🔑 {j['symbol']} [{j.get('exchange') or '?'}] "
               f"title={j['filing_type']!r} keys={exchange_keys or '(none)'}")
 
-        all_sent = True
+        # ── FIX #1: PARALLEL SUBSCRIBER DELIVERY ─────────────────────────
+        # Pre-filter subscribers who already received this filing via any path
+        # (exact match, results period, cross-exchange dedup). This preserves
+        # ALL existing deduplication logic before parallel send.
+        eligible_subscribers = []
         for phone in j["subscribers"]:
             if bot_db.is_filing_sent(phone, j["file_key"]):
-                print(f"ℹ️  Already sent filing {j['file_key']} to {phone}, skipping.")
                 continue
             if period_key and bot_db.is_result_period_sent(phone, j["symbol"], period_key):
-                print(f"ℹ️  Already sent {j['symbol']} results for '{period_key}' to {phone} "
-                      f"(different filing PDF) — skipping duplicate.")
                 bot_db.mark_filing_sent(phone, j["file_key"])
                 continue
             hit = next((k for k in exchange_keys
                         if bot_db.is_cross_exchange_sent(phone, k, j["raw_time"])), None)
             if hit:
-                print(f"ℹ️  {j['symbol']} '{j['filing_type']}' already delivered to "
-                      f"{phone} from the other exchange — skipping duplicate "
-                      f"(matched {hit}).")
                 bot_db.mark_filing_sent(phone, j["file_key"])
                 continue
-            # Only marks sent on confirmed success; queues on failure.
-            ok = _try_send(phone, j["file_path"], caption, j["file_key"],
-                           filing_id=j["filing_id"], template_params=[j["company"]])
-            if ok and period_key:
-                bot_db.mark_result_period_sent(phone, j["symbol"], period_key)
-            if ok:
-                for k in exchange_keys:
-                    bot_db.mark_cross_exchange_sent(
-                        phone, k, j.get("exchange") or "", j["raw_time"]
-                    )
-            if not ok:
-                all_sent = False
+            eligible_subscribers.append(phone)
+
+        # Everyone already got it — mark notified and continue
+        if not eligible_subscribers:
+            mark_notified_in_pg(j["filing_id"])
+            continue
+
+        # Send to all eligible subscribers in PARALLEL using bounded thread pool
+        def _send_one_subscriber(phone):
+            """Send to one subscriber. Returns (phone, success_bool)."""
+            try:
+                ok = _try_send(phone, j["file_path"], caption, j["file_key"],
+                               filing_id=j["filing_id"], template_params=[j["company"]])
+                return (phone, ok)
+            except Exception as e:
+                print(f"❌ Subscriber delivery thread error for {phone}: {e}")
+                return (phone, False)
+
+        # Bounded worker pool respects WhatsApp API rate limits
+        workers = min(config.WHATSAPP_SEND_WORKERS, len(eligible_subscribers))
+        send_results = {}
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wa-send") as pool:
+            for phone, ok in pool.map(_send_one_subscriber, eligible_subscribers):
+                send_results[phone] = ok
+                # Mark ancillary deduplication records on success
+                if ok:
+                    if period_key:
+                        bot_db.mark_result_period_sent(phone, j["symbol"], period_key)
+                    for k in exchange_keys:
+                        bot_db.mark_cross_exchange_sent(
+                            phone, k, j.get("exchange") or "", j["raw_time"]
+                        )
 
         # Mark notified in PG only when EVERY subscriber got it. Otherwise the
         # filing stays is_notified=FALSE and is retried on the next poll for
         # anyone still missing it (already-sent users are skipped above).
+        all_sent = all(send_results.values())
         if all_sent:
             mark_notified_in_pg(j["filing_id"])
+        else:
+            failed_count = sum(1 for ok in send_results.values() if not ok)
+            print(f"⚠️  {failed_count}/{len(eligible_subscribers)} sends failed "
+                  f"for {j['file_key']} — will retry on next poll")
 
 
 # ── Automatic backfill for subscribers ───────────────────────
@@ -1898,13 +1922,103 @@ def start_watcher():
     ensure_schema()
 
     def live_loop():
-        print(f"⚡ Live dispatch started — checking for NEW filings every {config.POLL_INTERVAL_SEC}s")
-        while True:
-            try:
-                process_new_filings()
-            except Exception as e:
-                print(f"❌ Live dispatch error: {e}")
-            time.sleep(config.POLL_INTERVAL_SEC)
+        """
+        FIX #2: PostgreSQL LISTEN/NOTIFY replaces polling delay.
+        Bot wakes immediately (~100ms) when a PDF is downloaded.
+        Fallback safety poll every 60s catches any missed notifications.
+        """
+        print(f"⚡ Live dispatch starting with LISTEN/NOTIFY...")
+        conn = None
+        cursor = None
+
+        try:
+            import select
+            
+            # Dedicated persistent connection for LISTEN
+            conn = get_pg_conn()
+            conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+            cursor = conn.cursor()
+            cursor.execute("LISTEN new_filing")
+            print(f"✅ LISTEN new_filing active — bot wakes on NOTIFY (~100ms latency)")
+            print(f"   Safety fallback poll: every {config.POLL_INTERVAL_SEC}s")
+
+            while True:
+                try:
+                    # Wait for notification with timeout = existing poll interval (safety fallback)
+                    readable, _, _ = select.select([conn], [], [], float(config.POLL_INTERVAL_SEC))
+                    
+                    if readable:
+                        # Notification received — process immediately
+                        conn.poll()
+                        while conn.notifies:
+                            notify = conn.notifies.pop(0)
+                            print(f"🔔 NOTIFY: {notify.payload[:80] if notify.payload else '(empty)'}")
+                    else:
+                        # Timeout — safety fallback poll (same interval as original polling)
+                        print(f"⏰ {config.POLL_INTERVAL_SEC}s fallback poll (no NOTIFY received)")
+
+                    # Process new filings (on NOTIFY or timeout)
+                    process_new_filings()
+
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as conn_err:
+                    # LISTEN connection died — reconnect and resume
+                    print(f"❌ LISTEN connection lost: {conn_err} — reconnecting...")
+                    try:
+                        if cursor:
+                            cursor.close()
+                    except:
+                        pass
+                    try:
+                        if conn:
+                            conn.close()
+                    except:
+                        pass
+                    
+                    # Create new dedicated connection for LISTEN
+                    try:
+                        conn = get_pg_conn()
+                        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+                        cursor = conn.cursor()
+                        cursor.execute("LISTEN new_filing")
+                        print("✅ LISTEN reconnected successfully")
+                    except Exception as reconn_err:
+                        print(f"❌ LISTEN reconnection failed: {reconn_err} — will retry in 5s")
+                        time.sleep(5)
+                
+                except Exception as e:
+                    print(f"❌ Live dispatch error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    time.sleep(5)
+
+        except Exception as setup_err:
+            # LISTEN setup failed — fall back to original polling
+            print(f"❌ LISTEN setup failed: {setup_err}")
+            print(f"⚠️  Falling back to POLLING mode (safe, original behavior)")
+            import traceback
+            traceback.print_exc()
+            
+            # Original polling loop
+            print(f"⚡ Live dispatch started — checking for NEW filings every {config.POLL_INTERVAL_SEC}s")
+            while True:
+                try:
+                    process_new_filings()
+                except Exception as e:
+                    print(f"❌ Live dispatch error: {e}")
+                time.sleep(config.POLL_INTERVAL_SEC)
+                
+        finally:
+            # Clean up LISTEN connection
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
 
     def backfill_loop():
         interval = getattr(config, "BACKFILL_INTERVAL_SEC", 600)

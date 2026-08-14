@@ -89,6 +89,12 @@ SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 300)
 # parallel so later PDFs don't wait behind earlier summaries.
 SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 6))
 
+# How many WhatsApp messages to send concurrently during subscriber delivery.
+# A bounded thread pool prevents overwhelming the WhatsApp API while enabling
+# parallel delivery to many subscribers. Default 20 is safe for Meta's rate
+# limits (80 msg/s) and prevents sequential delivery delays.
+WHATSAPP_SEND_WORKERS = int(os.environ.get("WHATSAPP_SEND_WORKERS", 20))
+
 # LLM used for the AI summary (in-process via output.py / LangChain).
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
 SUMMARY_MODEL    = os.environ.get("SUMMARY_MODEL", "gpt-4o-mini")
