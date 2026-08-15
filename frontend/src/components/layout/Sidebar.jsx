@@ -9,7 +9,7 @@ export function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) 
 
     const menuItems = [
         {
-            name: "Terminal Dashboard",
+            name: "Dashboard",
             path: "/dashboard",
             icon: (
                 <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -18,7 +18,7 @@ export function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) 
             ),
         },
         {
-            name: "Watchlist Builder",
+            name: "My Watchlist",
             path: "/companies",
             icon: (
                 <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -27,7 +27,7 @@ export function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) 
             ),
         },
         {
-            name: "Subscription Center",
+            name: "My Plan",
             path: "/plans",
             icon: (
                 <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">

@@ -184,7 +184,7 @@ function LandingPage() {
                     <div className="flex gap-[44px] mt-[46px] pt-[30px] border-t border-[#1E2535] justify-center lg:justify-start">
                         <div className="text-center lg:text-left">
                             <div className="font-display text-[30px] font-bold tracking-[-1px] text-[#EDF0F4]">
-                                <span className="text-[#33D097]"><AnimatedCounter end={200} /></span>+
+                                <span className="text-[#33D097]"><AnimatedCounter end={5000} /></span>+
                             </div>
                             <div className="text-[12px] text-[#646E7E] font-semibold mt-1 tracking-[0.3px] uppercase">Companies</div>
                         </div>
@@ -285,7 +285,7 @@ function LandingPage() {
             <div className="relative z-10 border-y border-[#1E2535] bg-[#0B0E16]/50 py-[22px] mt-[60px]">
                 <div className="max-w-[1180px] mx-auto px-6 flex justify-between gap-[18px] flex-wrap">
                     {[
-                        "200+ Companies",
+                        "5000 Companies",
                         "WhatsApp Alerts",
                         "Free Forever Plan",
                         "NSE & BSE Coverage",
