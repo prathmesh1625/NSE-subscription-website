@@ -42,6 +42,30 @@ async function ensureSchema() {
         CREATE UNIQUE INDEX IF NOT EXISTS announcements_pdf_url_key ON announcements(pdf_url);
     `);
 
+    // Read-path indexes for the Central Dashboard's admin API. Without these
+    // both of its announcements-backed panels degrade to full sequential
+    // scans and start timing out once this table gets large:
+    //
+    //   - listScrapedCompanies groups by company_symbol ("Scraped companies")
+    //   - getCompanyFilings filters by company_symbol (one company's filings)
+    //   - fetchUserDeliveries resolves PDF basenames back to announcements
+    //     ("Alerts delivered" — the company/title/filed-at/PDF columns)
+    //
+    // The last one matches on regexp_replace(local_path, ...) rather than on
+    // the bare column, so it needs an EXPRESSION index. The expression below
+    // must stay byte-for-byte identical to the one in the backend's
+    // adminRepository.fetchUserDeliveries, or Postgres won't use this index
+    // and that panel silently falls back to "—" in every column.
+    await db.query(`
+        CREATE INDEX IF NOT EXISTS idx_announcements_company_symbol
+            ON announcements(company_symbol);
+    `);
+
+    await db.query(`
+        CREATE INDEX IF NOT EXISTS idx_announcements_file_key
+            ON announcements((regexp_replace(local_path, '^.*[/\\\\]', '')));
+    `);
+
     // ── company_state ─────────────────────────────────────────────────────────
     await db.query(`
         CREATE TABLE IF NOT EXISTS company_state (
