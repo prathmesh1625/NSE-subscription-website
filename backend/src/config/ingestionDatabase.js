@@ -16,6 +16,16 @@ const pool = new Pool({
     max: 5,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
+
+    // The dashboard's product client gives up on a request after 10s, but
+    // Postgres keeps executing the query it abandoned — a slow scan here can
+    // therefore keep occupying one of the 5 connections long after anyone is
+    // waiting for it, starving every later request until it finishes. Cap it
+    // server-side so an abandoned query releases its connection instead.
+    // Well above what these queries cost once the announcements indexes from
+    // scraper/db/ensureSchema.js exist (milliseconds), so this only ever
+    // fires on genuinely pathological queries.
+    statement_timeout: 15000,
 });
 
 pool.on("error", (err) => {

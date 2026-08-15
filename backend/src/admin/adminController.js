@@ -520,10 +520,16 @@ async function getUser(req, res) {
             // when. Rendered by the dashboard's generic "table" section, so
             // no frontend change is needed for it. Fails soft to an empty
             // list when the bot is unreachable (see fetchUserDeliveries).
-            const deliveries = await repo.fetchUserDeliveries(profile.mobile);
+            const { deliveries, metadataResolved } = await repo.fetchUserDeliveries(profile.mobile);
             sections.push({
                 key: "delivery_history",
-                title: `Alerts delivered (${deliveries.length})`,
+                // When the announcements lookup fails, every column except
+                // "Delivered to user" comes back empty. Say that in the title
+                // rather than showing a wall of "—" that reads as real data.
+                title: metadataResolved
+                    ? `Alerts delivered (${deliveries.length})`
+                    : `Alerts delivered (${deliveries.length}) — filing details unavailable ` +
+                      `(could not reach the scraper database)`,
                 type: "table",
                 data: {
                     // Times are pre-formatted IST strings from the repository —
@@ -839,7 +845,12 @@ async function listCompanies(req, res) {
     try {
         const search = String(req.query.search || "").trim();
         const page = Math.max(1, Number(req.query.page) || 1);
-        const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
+        // Capped at 500 rather than 100: the dashboard's directory pages
+        // through this until it has every company, so a low cap turned one
+        // directory load into ~20 sequential round-trips, each re-aggregating
+        // the announcements table. A company row is tiny, so a larger page is
+        // far cheaper than the extra round-trips it removes.
+        const pageSize = Math.min(500, Math.max(1, Number(req.query.pageSize) || 20));
 
         const { rows, total } = await repo.listScrapedCompanies(search, page, pageSize);
 

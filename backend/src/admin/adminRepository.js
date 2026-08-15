@@ -660,14 +660,21 @@ function formatDeliveryStampIst(utcValue) {
  * fetches the delivery list, then resolves the basenames in one batched
  * query against announcements.local_path.
  *
- * Fails soft (returns []) when the bot is unreachable/unconfigured, matching
+ * Fails soft when the bot is unreachable/unconfigured, matching
  * fetchDeliveryStatusMap — a user's profile must still open without it.
+ *
+ * Returns { deliveries, metadataResolved }. `metadataResolved` is false when
+ * the announcements lookup itself failed, which is NOT the same thing as a
+ * filing having no metadata: both produce empty company/title/filed-at
+ * columns, but one is a broken backend and the other is normal. The caller
+ * uses it to say so in the UI rather than rendering a table of "—" that
+ * looks like real data.
  */
 async function fetchUserDeliveries(mobile, limit = 200) {
     const baseUrl = process.env.BOT_ADMIN_URL;
     const apiKey = process.env.BOT_ADMIN_KEY;
 
-    if (!baseUrl || !apiKey) return [];
+    if (!baseUrl || !apiKey) return { deliveries: [], metadataResolved: true };
 
     let deliveries = [];
     try {
@@ -679,10 +686,10 @@ async function fetchUserDeliveries(mobile, limit = 200) {
         deliveries = response.data.deliveries || [];
     } catch (err) {
         console.error("Failed to fetch user deliveries from bot:", err.message);
-        return [];
+        return { deliveries: [], metadataResolved: true };
     }
 
-    if (deliveries.length === 0) return [];
+    if (deliveries.length === 0) return { deliveries: [], metadataResolved: true };
 
     // Resolve PDF basenames -> announcement metadata in ONE query rather than
     // per delivery. local_path is stored as a relative path
@@ -690,6 +697,7 @@ async function fetchUserDeliveries(mobile, limit = 200) {
     // last slash/backslash to compare against the bot's file_key.
     const keys = deliveries.map((d) => d.filingKey).filter(Boolean);
     const metaByKey = new Map();
+    let metadataResolved = true;
 
     try {
         const result = await ingestionDb.query(
@@ -714,10 +722,13 @@ async function fetchUserDeliveries(mobile, limit = 200) {
         result.rows.forEach((r) => metaByKey.set(r.file_key, r));
     } catch (err) {
         // Metadata is a nice-to-have; the delivery record itself is the point.
+        // Still flagged upward so the dashboard can distinguish "lookup broke"
+        // from "these filings genuinely have no metadata".
         console.error("Failed to resolve delivered filings to announcements:", err.message);
+        metadataResolved = false;
     }
 
-    return deliveries.map((d) => {
+    const rows = deliveries.map((d) => {
         const m = metaByKey.get(d.filingKey);
 
         const deliveredAt = parseUtcStamp(d.sentAt);
@@ -737,6 +748,8 @@ async function fetchUserDeliveries(mobile, limit = 200) {
             delayMs,
         };
     });
+
+    return { deliveries: rows, metadataResolved };
 }
 
 /**
@@ -873,29 +886,48 @@ async function listScrapedCompanies(search, page, pageSize) {
     const offset = (page - 1) * pageSize;
     const like = `%${search || ""}%`;
 
+    // One pass, not two. This used to run a second COUNT(DISTINCT ...) query
+    // to get the total, which meant every page of the directory aggregated
+    // the whole announcements table twice. COUNT(*) OVER() reads the total
+    // off the same grouped result instead.
+    //
+    // The ORDER BY carries company_symbol as a tiebreaker because the caller
+    // pages through this with LIMIT/OFFSET: latest_filing_at is not unique
+    // (and is NULL for never-downloaded rows), so without a deterministic
+    // tiebreaker the same company could appear on two pages while another is
+    // skipped entirely.
     const result = await ingestionDb.query(
         `
+        WITH grouped AS (
+            SELECT
+                company_symbol,
+                COUNT(*)::int          AS filing_count,
+                MAX(announcement_time) AS latest_filing_at
+            FROM announcements
+            WHERE ($1 = '' OR company_symbol ILIKE $2)
+            GROUP BY company_symbol
+        )
         SELECT
             company_symbol,
-            COUNT(*)::int              AS filing_count,
-            MAX(announcement_time)     AS latest_filing_at
-        FROM announcements
-        WHERE ($1 = '' OR company_symbol ILIKE $2)
-        GROUP BY company_symbol
-        ORDER BY latest_filing_at DESC NULLS LAST
+            filing_count,
+            latest_filing_at,
+            -- Parenthesised so the cast applies to the window function's
+            -- result, not to OVER()'s argument list. The ::int matters:
+            -- COUNT returns bigint, which node-postgres hands back as a
+            -- STRING, and this value becomes the API's "total" field, which
+            -- the dashboard compares numerically.
+            (COUNT(*) OVER())::int AS total_companies
+        FROM grouped
+        ORDER BY latest_filing_at DESC NULLS LAST, company_symbol
         LIMIT $3 OFFSET $4
         `,
         [search || "", like, pageSize, offset]
     );
 
-    const countResult = await ingestionDb.query(
-        `
-        SELECT COUNT(DISTINCT company_symbol)::int AS count
-        FROM announcements
-        WHERE ($1 = '' OR company_symbol ILIKE $2)
-        `,
-        [search || "", like]
-    );
+    // COUNT(*) OVER() rides along on every row, so it's only readable when the
+    // page has rows. An empty page (offset past the end, or no match) means
+    // no companies matched at this offset — fall back to 0.
+    const total = result.rows.length > 0 ? result.rows[0].total_companies : 0;
 
     const symbols = result.rows.map((r) => r.company_symbol);
     const nameMap = await getCompanyNamesBySymbols(symbols);
@@ -907,7 +939,7 @@ async function listScrapedCompanies(search, page, pageSize) {
             filingCount: r.filing_count,
             latestFilingAt: r.latest_filing_at,
         })),
-        total: countResult.rows[0].count,
+        total,
     };
 }
 
