@@ -13,8 +13,8 @@ module.exports = {
 
     // Poll cadence. BSE disseminates a lot of filings minutes before the same
     // document shows up on NSE, so this service runs a much tighter loop than
-    // the NSE scraper's 20s cycle — that head start is the whole point of it.
-    interval: num(process.env.BSE_INTERVAL, 8000),
+    // the NSE scraper's 10s cycle — that head start is the whole point of it.
+    interval: num(process.env.BSE_INTERVAL, 5000),
 
     // Newest-first pages (50 rows each) to pull per cycle. Paging stops early
     // as soon as a page holds nothing newer than the previous cycle's

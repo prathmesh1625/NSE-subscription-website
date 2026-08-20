@@ -42,7 +42,7 @@ BOT_ADMIN_KEY = os.environ.get("BOT_ADMIN_KEY", "")
 FLASK_PORT        = int(os.environ.get("FLASK_PORT", 5000))
 FLASK_DEBUG       = os.environ.get("FLASK_DEBUG", "False").lower() in ("true", "1", "yes")
 ENABLE_DB_WATCHER = os.environ.get("ENABLE_DB_WATCHER", "True").lower() in ("true", "1", "yes")
-POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", 5))    # Live dispatch: check for brand-new filings every 5s (time-critical path - reduced from 15s for faster delivery)
+POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", 2))    # Live dispatch: check for brand-new filings every 2s (time-critical path - reduced from 5s for faster delivery)
 
 # How often the SLOW subscriber catch-up/backfill runs. This task is heavy
 # (every subscriber × every company × latest PDFs) so it runs on its OWN thread,
@@ -57,22 +57,27 @@ BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 
 # on timeout we send the PDF with the basic caption (company + exchange time +
 # title) instead. Cost is not a concern, so this is generous.
 #
-# REDUCED from 120s to 30s for FASTER delivery - we prioritize speed over perfect summaries
-# If summary fails, we retry on next poll (SUMMARY_RETRY_ATTEMPTS) or send basic caption
-SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 30))
+# REDUCED to 15s for FASTER delivery - we prioritize speed over perfect summaries
+# If summary fails, we send basic caption immediately (no retries)
+SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 15))
 
 # When the AI summary fails, hold the filing back and re-summarise it on the
 # next poll instead of shipping the degraded "summary isn't available" caption.
 #
-# REDUCED retry attempts from 3 to 1 for FASTER delivery - we prioritize speed
-# If summary fails once, we send the basic caption rather than waiting for retries
-SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 1))
+# NO RETRIES for FASTEST delivery - we prioritize speed
+# If summary fails, we send the basic caption immediately
+SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 0))
 SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 60))
 
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
-# INCREASED from 6 to 10 for faster parallel processing during announcement bursts
-SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 10))
+# INCREASED to 15 for faster parallel processing during announcement bursts
+SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 15))
+
+# PRE-WARM summaries as soon as PDFs are downloaded (before finding subscribers)
+# This eliminates summary generation delay from the critical send path
+PREWARM_SUMMARIES = os.environ.get("PREWARM_SUMMARIES", "True").lower() in ("true", "1", "yes")
+PREWARM_TIMEOUT_SEC = int(os.environ.get("PREWARM_TIMEOUT_SEC", 20))
 
 # LLM used for the AI summary (in-process via output.py / LangChain).
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")

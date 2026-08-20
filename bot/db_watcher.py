@@ -84,6 +84,7 @@ def _dedup_by_filename(rows):
 
 def fetch_new_filings():
     try:
+        query_start = time.time()
         conn = get_pg_conn()
         cur  = conn.cursor()
         query = f"""
@@ -106,18 +107,131 @@ def fetch_new_filings():
         rows = cur.fetchall()
         cur.close()
         conn.close()
+        
+        query_time = time.time() - query_start
+        print(f"⏱️ [DB Query] Fetched {len(rows)} filings from database in {query_time:.3f}s")
 
+        resolve_start = time.time()
         resolved = []
         for row in rows:
             row = dict(row)
             rel = row.get("file_path") or ""
             row["file_path"] = os.path.join(config.SCRAPER_BASE_PATH, rel.strip())
             resolved.append(row)
+        
+        resolve_time = time.time() - resolve_start
+        if resolved:
+            print(f"⏱️ [Path Resolution] Resolved {len(resolved)} file paths in {resolve_time:.3f}s")
+        
+        # PRE-WARM: Generate AI summaries for new filings immediately
+        # This happens in parallel BEFORE we even find subscribers
+        if getattr(config, "PREWARM_SUMMARIES", True):
+            _prewarm_summaries(resolved)
+        
         return resolved
 
     except Exception as e:
         print(f"❌ PostgreSQL error while fetching filings: {e}")
         return []
+
+
+def _prewarm_summaries(filings):
+    """Pre-generate AI summaries in parallel for new filings before sending."""
+    if not filings:
+        return
+    
+    from concurrent.futures import as_completed
+    
+    start_time = time.time()
+    print(f"\n{'='*60}")
+    print(f"🔥 PRE-WARM PHASE: Starting AI summary generation")
+    print(f"{'='*60}")
+    
+    cache_check_start = time.time()
+    futures = []
+    cached_count = 0
+    
+    for filing in filings:
+        file_path = filing.get("file_path", "")
+        if not os.path.exists(file_path):
+            print(f"⚠️ File not found: {file_path}")
+            continue
+        
+        file_key = os.path.basename(file_path)
+        
+        # Skip if already cached
+        if bot_db.get_filing_summary(file_key, SUMMARY_FORMAT_VERSION):
+            cached_count += 1
+            print(f"⚡ [Cache HIT] Using cached summary for {file_key}")
+            continue
+        
+        print(f"🔥 [Cache MISS] Pre-warming summary for {file_key}...")
+        summary_start = time.time()
+        
+        # Submit to thread pool
+        future = _caption_pool.submit(
+            _prewarm_single_summary,
+            file_path,
+            filing.get("company_name"),
+            filing.get("filing_type", ""),
+            filing.get("pdf_url", ""),
+            summary_start
+        )
+        futures.append((file_key, future, summary_start))
+    
+    cache_check_time = time.time() - cache_check_start
+    print(f"⏱️ [Cache Check] Completed in {cache_check_time:.3f}s - {cached_count} cached, {len(futures)} need generation")
+    
+    if not futures:
+        print(f"✅ All summaries already cached! No generation needed.\n")
+        return
+    
+    # Wait for all summaries (with timeout)
+    prewarm_timeout = getattr(config, "PREWARM_TIMEOUT_SEC", 20)
+    success_count = 0
+    fail_count = 0
+    
+    for file_key, future, started_at in futures:
+        try:
+            future.result(timeout=prewarm_timeout)
+            generation_time = time.time() - started_at
+            print(f"✅ [SUCCESS] {file_key} generated in {generation_time:.2f}s")
+            success_count += 1
+        except Exception as e:
+            generation_time = time.time() - started_at
+            print(f"❌ [FAILED] {file_key} failed after {generation_time:.2f}s: {e}")
+            fail_count += 1
+    
+    total_time = time.time() - start_time
+    print(f"\n{'='*60}")
+    print(f"⏱️ PRE-WARM SUMMARY: {total_time:.2f}s total")
+    print(f"   ✅ Success: {success_count}")
+    print(f"   ❌ Failed: {fail_count}")
+    print(f"   ⚡ Cached: {cached_count}")
+    print(f"{'='*60}\n")
+
+
+def _prewarm_single_summary(file_path, company, filing_type, download_url, start_time):
+    """Generate and cache a single summary."""
+    file_key = os.path.basename(file_path)
+    try:
+        pdf_parse_start = time.time()
+        summary = generate_pdf_summary(file_path, company, filing_type, download_url)
+        pdf_parse_time = time.time() - pdf_parse_start
+        
+        if summary:
+            cache_save_start = time.time()
+            trimmed = summary[:3997] + "..." if len(summary) > 4000 else summary
+            bot_db.save_filing_summary(file_key, trimmed, SUMMARY_FORMAT_VERSION)
+            cache_save_time = time.time() - cache_save_start
+            
+            total_time = time.time() - start_time
+            print(f"   ⏱️ {file_key}: PDF→AI={pdf_parse_time:.2f}s, Cache={cache_save_time:.3f}s, Total={total_time:.2f}s")
+        else:
+            print(f"⚠️ Pre-warm summary empty for {file_key} (took {pdf_parse_time:.2f}s)")
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"❌ Pre-warm error for {file_key} after {elapsed:.2f}s: {e}")
 
 
 def mark_notified_in_pg(filing_id):
@@ -1493,12 +1607,26 @@ def process_new_filings():
     as ONE summary, not N — so every PDF lands with its summary within ~1 minute
     instead of the later ones queuing for minutes.
     """
+    start_time = time.time()
+    print(f"\n{'='*70}")
+    print(f"📤 PROCESSING NEW FILINGS - {datetime.now().strftime('%H:%M:%S')}")
+    print(f"{'='*70}")
+    
+    fetch_start = time.time()
     filings = fetch_new_filings()
     filings = _dedup_by_filename(filings)
     if not filings:
         return
 
+    fetch_time = time.time() - fetch_start
+    print(f"⏱️ [Fetch Complete] Got {len(filings)} new filings in {fetch_time:.3f}s")
+
     # ── Phase 1: resolve subscribers / drop undeliverable filings ────────
+    phase1_start = time.time()
+    print(f"\n{'─'*70}")
+    print(f"📋 PHASE 1: Subscriber Resolution")
+    print(f"{'─'*70}")
+    
     jobs = []
     for filing in filings:
         filing_id   = filing["filing_id"]
@@ -1507,17 +1635,22 @@ def process_new_filings():
         file_path   = filing["file_path"]
         filing_type = filing.get("filing_type") or "New Filing"
 
+        lookup_start = time.time()
         subscribers = get_subscribers_for_symbol_pg(symbol)
+        lookup_time = time.time() - lookup_start
+        
         if subscribers is None:
             # Lookup FAILED (transient DB error) — do NOT mark notified; leave it
             # is_notified=FALSE so the very next poll retries instead of dropping
             # it to the slow backfill.
-            print(f"⚠️  Subscriber lookup failed for {symbol}; will retry next poll.")
+            print(f"⚠️  Subscriber lookup failed for {symbol} (took {lookup_time:.3f}s); will retry next poll.")
             continue
         if not subscribers:
             mark_notified_in_pg(filing_id)
-            print(f"ℹ️  No subscribers for {symbol}, skipping.")
+            print(f"ℹ️  No subscribers for {symbol}, skipping. (lookup took {lookup_time:.3f}s)")
             continue
+        
+        print(f"   ✓ {symbol}: Found {len(subscribers)} subscribers in {lookup_time:.3f}s")
 
         if not os.path.exists(file_path):
             print(f"⚠️  File not found: {file_path} — marking to prevent loop.")
@@ -1542,23 +1675,47 @@ def process_new_filings():
         })
 
     if not jobs:
+        print(f"⏱️ [Phase 1 Complete] No jobs to process")
         return
 
+    phase1_time = time.time() - phase1_start
+    total_subscribers = sum(len(j["subscribers"]) for j in jobs)
+    print(f"⏱️ [Phase 1 Complete] {phase1_time:.3f}s - {len(jobs)} filings → {total_subscribers} total deliveries")
+
     # ── Phase 2: build all captions concurrently (summary + exchange time) ─
-    futures = {
-        j["file_key"]: _caption_pool.submit(
+    phase2_start = time.time()
+    print(f"\n{'─'*70}")
+    print(f"📝 PHASE 2: Caption Generation (Concurrent)")
+    print(f"{'─'*70}")
+    
+    futures = {}
+    for j in jobs:
+        caption_start = time.time()
+        futures[j["file_key"]] = (_caption_pool.submit(
             _full_caption_ex, j["company"], j["symbol"], j["filing_type"],
             j["file_path"], j["raw_time"], j["download_url"],
-        )
-        for j in jobs
-    }
+        ), caption_start)
+
+    phase2_time = time.time() - phase2_start
+    print(f"⏱️ [Phase 2 Dispatch] Submitted {len(jobs)} caption jobs in {phase2_time:.3f}s")
 
     # ── Phase 3: deliver ONE message per subscriber ──────────────────────
+    phase3_start = time.time()
+    print(f"\n{'─'*70}")
+    print(f"📨 PHASE 3: WhatsApp Message Delivery")
+    print(f"{'─'*70}")
+    
     for j in jobs:
+        caption_wait_start = time.time()
         try:
-            caption, summary_ok = futures[j["file_key"]].result()
+            future, caption_submitted_at = futures[j["file_key"]]
+            caption, summary_ok = future.result()
+            caption_time = time.time() - caption_submitted_at
+            wait_time = time.time() - caption_wait_start
+            print(f"   ✓ {j['file_key']}: Caption ready (generation={caption_time:.3f}s, wait={wait_time:.3f}s)")
         except Exception as e:
-            print(f"❌ Caption build failed for {j['file_key']}: {e}")
+            caption_time = time.time() - caption_wait_start
+            print(f"❌ Caption build failed for {j['file_key']} after {caption_time:.3f}s: {e}")
             caption = _caption_with_time(
                 f"📄 *{j['company']}* — {j['filing_type']}\n🏦 Symbol: {j['symbol']}",
                 j["company"], j["symbol"], j["raw_time"],
@@ -1607,41 +1764,67 @@ def process_new_filings():
               f"title={j['filing_type']!r} keys={exchange_keys or '(none)'}")
 
         all_sent = True
+        sent_count = 0
+        skip_count = 0
+        fail_count = 0
+        
         for phone in j["subscribers"]:
+            send_start = time.time()
+            
             if bot_db.is_filing_sent(phone, j["file_key"]):
-                print(f"ℹ️  Already sent filing {j['file_key']} to {phone}, skipping.")
+                skip_count += 1
                 continue
             if period_key and bot_db.is_result_period_sent(phone, j["symbol"], period_key):
-                print(f"ℹ️  Already sent {j['symbol']} results for '{period_key}' to {phone} "
-                      f"(different filing PDF) — skipping duplicate.")
+                skip_count += 1
                 bot_db.mark_filing_sent(phone, j["file_key"])
                 continue
             hit = next((k for k in exchange_keys
                         if bot_db.is_cross_exchange_sent(phone, k, j["raw_time"])), None)
             if hit:
-                print(f"ℹ️  {j['symbol']} '{j['filing_type']}' already delivered to "
-                      f"{phone} from the other exchange — skipping duplicate "
-                      f"(matched {hit}).")
+                skip_count += 1
                 bot_db.mark_filing_sent(phone, j["file_key"])
                 continue
+            
             # Only marks sent on confirmed success; queues on failure.
             ok = _try_send(phone, j["file_path"], caption, j["file_key"],
                            filing_id=j["filing_id"], template_params=[j["company"]])
-            if ok and period_key:
-                bot_db.mark_result_period_sent(phone, j["symbol"], period_key)
+            
+            send_time = time.time() - send_start
+            
             if ok:
+                sent_count += 1
+                print(f"   ✓ Sent to {phone[-4:]} in {send_time:.3f}s")
+                if period_key:
+                    bot_db.mark_result_period_sent(phone, j["symbol"], period_key)
                 for k in exchange_keys:
                     bot_db.mark_cross_exchange_sent(
                         phone, k, j.get("exchange") or "", j["raw_time"]
                     )
-            if not ok:
+            else:
+                fail_count += 1
                 all_sent = False
+                print(f"   ✗ Failed to send to {phone[-4:]} after {send_time:.3f}s")
+        
+        if sent_count + skip_count + fail_count > 0:
+            print(f"   Summary: {sent_count} sent, {skip_count} skipped, {fail_count} failed")
 
         # Mark notified in PG only when EVERY subscriber got it. Otherwise the
         # filing stays is_notified=FALSE and is retried on the next poll for
         # anyone still missing it (already-sent users are skipped above).
         if all_sent:
             mark_notified_in_pg(j["filing_id"])
+
+    phase3_time = time.time() - phase3_start
+    total_time = time.time() - start_time
+    
+    print(f"\n{'='*70}")
+    print(f"⏱️ PHASE SUMMARY:")
+    print(f"   Phase 1 (Subscriber Lookup): {phase1_time:.3f}s")
+    print(f"   Phase 2 (Caption Generation): {phase2_time:.3f}s")
+    print(f"   Phase 3 (WhatsApp Delivery):  {phase3_time:.3f}s")
+    print(f"   ───────────────────────────────────")
+    print(f"   TOTAL: {total_time:.3f}s for {len(jobs)} filings")
+    print(f"{'='*70}\n")
 
 
 # ── Automatic backfill for subscribers ───────────────────────
