@@ -42,7 +42,7 @@ BOT_ADMIN_KEY = os.environ.get("BOT_ADMIN_KEY", "")
 FLASK_PORT        = int(os.environ.get("FLASK_PORT", 5000))
 FLASK_DEBUG       = os.environ.get("FLASK_DEBUG", "False").lower() in ("true", "1", "yes")
 ENABLE_DB_WATCHER = os.environ.get("ENABLE_DB_WATCHER", "True").lower() in ("true", "1", "yes")
-POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", 15))    # Live dispatch: check for brand-new filings every 15s (time-critical path)
+POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", 5))    # Live dispatch: check for brand-new filings every 5s (time-critical path - reduced from 15s for faster delivery)
 
 # How often the SLOW subscriber catch-up/backfill runs. This task is heavy
 # (every subscriber × every company × latest PDFs) so it runs on its OWN thread,
@@ -57,37 +57,22 @@ BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 
 # on timeout we send the PDF with the basic caption (company + exchange time +
 # title) instead. Cost is not a concern, so this is generous.
 #
-# A RESULTS filing needs TWO calls to fit inside this one cap: the metrics
-# extraction (output.RESULT_EXTRACT_TIMEOUT_SEC, 45s — it sends up to 80k chars
-# of a 46-page filing) and, if that fails or finds nothing, the plain content
-# summary (25s). At the old 35s the extraction alone consumed the whole budget
-# on every large results PDF, so the fallback summary never ran and the filing
-# went out with an EMPTY body.
-#
-# A SCANNED filing adds OCR ahead of both (output.OCR_TIME_BUDGET_SEC, 25s), so
-# the worst case is 25 + 45 + 25 = 95 and this has to clear it. Only the scanned
-# minority pays that: OCR is skipped whenever the embedded text layer already
-# yields a results table, which is the common case.
-SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 120))
+# REDUCED from 120s to 30s for FASTER delivery - we prioritize speed over perfect summaries
+# If summary fails, we retry on next poll (SUMMARY_RETRY_ATTEMPTS) or send basic caption
+SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 30))
 
 # When the AI summary fails, hold the filing back and re-summarise it on the
 # next poll instead of shipping the degraded "summary isn't available" caption.
 #
-# The LLM errors that cause this are transient and clustered — a 429 during a
-# results-day burst, a timeout — but the old behaviour made them PERMANENT: the
-# filing was delivered with the fallback caption and marked is_notified, and
-# nothing ever revisited it. A two-second blip cost those subscribers a summary
-# for good.
-#
-# Bounded two ways, because a filing that can never be summarised must still go
-# out: an attempt count, and an absolute age ceiling. The age ceiling is what
-# holds after a restart, since the attempt count is per-process.
-SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 3))
-SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 300))
+# REDUCED retry attempts from 3 to 1 for FASTER delivery - we prioritize speed
+# If summary fails once, we send the basic caption rather than waiting for retries
+SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 1))
+SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 60))
 
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
-SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 6))
+# INCREASED from 6 to 10 for faster parallel processing during announcement bursts
+SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 10))
 
 # LLM used for the AI summary (in-process via output.py / LangChain).
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
