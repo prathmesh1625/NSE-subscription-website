@@ -601,6 +601,43 @@ def _impact_hashtag(impact: str) -> str:
     return ""
 
 
+def _highlight_key_terms(text: str) -> str:
+    """
+    Add WhatsApp bold formatting (*word*) to important financial terms.
+    
+    Highlights:
+    - Financial metrics: Revenue, Profit, EBITDA, EPS, PAT, etc.
+    - Growth indicators: increased, decreased, growth, surge, etc.
+    - Amounts: ₹500 Cr, ₹1,234.56 Lakh
+    - Percentages: 25%, 15.5%
+    - Time indicators: QoQ, YoY
+    """
+    if not text:
+        return text
+    
+    # Important financial keywords to bold
+    patterns = [
+        # Financial metrics
+        (r'\b(revenue|profit|loss|ebitda|eps|pat|pbt|opm|sales|income|margin|earnings)\b', r'*\1*'),
+        # Growth/decline indicators  
+        (r'\b(increased|decreased|growth|decline|rose|fell|surged|dropped|jumped|plunged|grew)\b', r'*\1*'),
+        # Results indicators
+        (r'\b(reported|announced|declared|posted)\b', r'*\1*'),
+        # Important amounts (₹ followed by numbers)
+        (r'(₹\s*[\d,]+(?:\.\d+)?\s*(?:Cr|crore|Lakh|lakh))', r'*\1*'),
+        # Percentages
+        (r'(\d+(?:\.\d+)?%)', r'*\1*'),
+        # QoQ/YoY
+        (r'\b(QoQ|YoY)\b', r'*\1*'),
+    ]
+    
+    result = text
+    for pattern, replacement in patterns:
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    
+    return result
+
+
 def _parse_event_impact_summary(text: str, fallback_event: str = ""):
     """
     Pull EVENT / IMPACT / SUMMARY out of the LLM output. Robust to the model
@@ -654,12 +691,15 @@ def _build_stock_bits_message(
     full-width look of the reference message.
     """
     lines = [f"📢 *{BRAND_NAME} Stock Bits!!*", ""]
-    lines.append(f"🏢 {company_name}")
+    lines.append(f"🏢 *{company_name}*")  # Bold company name
     lines.append("")
     if event:
-        lines.append(f"⚡ {event}")
+        lines.append(f"⚡ *{event}*")  # Bold event type
         lines.append("")
-    lines.append(f"🤖 {body}{_impact_hashtag(impact)}")
+    
+    # Add bold to key financial terms in the summary
+    formatted_body = _highlight_key_terms(body)
+    lines.append(f"🤖 {formatted_body}{_impact_hashtag(impact)}")
     lines.append("")
 
     link_added = False
