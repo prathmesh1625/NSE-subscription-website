@@ -15,7 +15,7 @@ import hashlib
 import threading
 import psycopg2
 import psycopg2.extras
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import config
@@ -83,6 +83,7 @@ def _dedup_by_filename(rows):
 
 
 def fetch_new_filings():
+    _started = time.monotonic()
     try:
         conn = get_pg_conn()
         cur  = conn.cursor()
@@ -113,10 +114,11 @@ def fetch_new_filings():
             rel = row.get("file_path") or ""
             row["file_path"] = os.path.join(config.SCRAPER_BASE_PATH, rel.strip())
             resolved.append(row)
+        print(f"⏱ [timing] fetch_new_filings rows={len(resolved)} duration={time.monotonic()-_started:.2f}s")
         return resolved
 
     except Exception as e:
-        print(f"❌ PostgreSQL error while fetching filings: {e}")
+        print(f"❌ [timing] fetch_new_filings FAILED duration={time.monotonic()-_started:.2f}s error={e}")
         return []
 
 
@@ -188,6 +190,40 @@ def get_subscribers_for_symbol_pg(symbol: str) -> list:
         # as "no subscribers" used to mark the filing notified and drop it to the
         # slow 10-min backfill — the cause of occasional very-late deliveries.
         print(f"❌ Error fetching PG subscribers for {symbol}: {e}")
+        return None
+
+
+def get_subscribers_for_symbols_pg(symbols: list[str]) -> dict[str, list]:
+    """Fetch subscribers for all symbols in ONE PostgreSQL connection."""
+    normalized = sorted({(x or "").upper().strip() for x in symbols if (x or "").strip()})
+    if not normalized:
+        return {}
+    started = time.monotonic()
+    try:
+        conn = psycopg2.connect(
+            host=config.DB_HOST, port=config.DB_PORT, dbname="nse_subscription",
+            user=config.DB_USER, password=config.DB_PASSWORD,
+        )
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT UPPER(c.symbol) AS symbol, u.mobile
+            FROM user_companies uc
+            JOIN users u ON u.id = uc.user_id
+            JOIN companies c ON c.id = uc.company_id
+            JOIN subscriptions s ON s.user_id = u.id
+            WHERE UPPER(c.symbol) = ANY(%s) AND s.status = 'ACTIVE';
+        """, (normalized,))
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        result = {symbol: [] for symbol in normalized}
+        for symbol, raw_phone in rows:
+            phone=(raw_phone or "").strip()
+            if len(phone)==10 and phone.isdigit(): phone="91"+phone
+            if phone: result.setdefault(symbol, []).append(phone)
+        print(f"⏱ [timing] subscriber_batch symbols={len(normalized)} rows={len(rows)} duration={time.monotonic()-started:.2f}s")
+        return result
+    except Exception as e:
+        print(f"❌ [timing] subscriber_batch FAILED symbols={len(normalized)} duration={time.monotonic()-started:.2f}s error={type(e).__name__}: {e}")
         return None
 
 
@@ -712,15 +748,22 @@ def _build_caption(file_path, fallback_caption, company=None,
     # Only reuse a cached summary that was produced by the CURRENT layout —
     # otherwise a filing summarised before a format change would be re-sent in
     # the old layout forever (this is why results kept arriving as "Stock Bits").
-    cached   = bot_db.get_filing_summary(file_key, SUMMARY_FORMAT_VERSION)
+    cache_started = time.monotonic()
+    cached = bot_db.get_filing_summary(file_key, SUMMARY_FORMAT_VERSION)
     if cached:
+        print(f"⚡ [summary-cache] HIT file={file_key} lookup={time.monotonic()-cache_started:.3f}s")
         return cached, True
 
+    print(f"🧠 [summary] CACHE_MISS file={file_key} company={company!r} filing_type={filing_type!r}")
+    summary_started = time.monotonic()
     ai_summary = generate_pdf_summary(file_path, company, filing_type, download_url)
+    elapsed = time.monotonic() - summary_started
     if ai_summary:
         trimmed = ai_summary[:3997] + "..." if len(ai_summary) > 4000 else ai_summary
         bot_db.save_filing_summary(file_key, trimmed, SUMMARY_FORMAT_VERSION)
+        print(f"✅ [summary] DONE file={file_key} duration={elapsed:.2f}s chars={len(trimmed)}")
         return trimmed, True
+    print(f"⚠️ [summary] FAILED file={file_key} duration={elapsed:.2f}s")
     # Failure is NOT cached — the caller decides whether to retry on a later
     # poll or accept the degraded caption.
     return fallback_caption, False
@@ -1499,10 +1542,14 @@ def process_new_filings():
     if not filings:
         return
 
-    # Subscriber membership is stable during one polling cycle. Reusing it
-    # avoids opening a PostgreSQL connection once per filing when several
-    # filings belong to the same company.
-    _subscriber_cache = {}
+    # Subscriber membership is stable during one polling cycle.
+    # Fetch all symbols with ONE PostgreSQL query.
+    symbols = [(f.get("symbol") or "").upper().strip() for f in filings]
+    subscriber_map = get_subscribers_for_symbols_pg(symbols)
+    if subscriber_map is None:
+        print("⚠️ [timing] Subscriber batch lookup failed; leaving filings for next poll.")
+        return
+    print(f"⏱ [timing] live_batch filings={len(filings)} symbols={len(set(symbols))}")
 
     # ── Phase 1: resolve subscribers / drop undeliverable filings ────────
     jobs = []
@@ -1513,13 +1560,8 @@ def process_new_filings():
         file_path   = filing["file_path"]
         filing_type = filing.get("filing_type") or "New Filing"
 
-        if symbol in _subscriber_cache:
-            subscribers = _subscriber_cache[symbol]
-        else:
-            _lookup_started = time.monotonic()
-            subscribers = get_subscribers_for_symbol_pg(symbol)
-            _subscriber_cache[symbol] = subscribers
-            print(f"⏱ Subscriber lookup {symbol}: {time.monotonic() - _lookup_started:.2f}s")
+        subscribers = subscriber_map.get(symbol, [])
+        print(f"🔎 [timing] subscribers symbol={symbol} count={len(subscribers)}")
         if subscribers is None:
             # Lookup FAILED (transient DB error) — do NOT mark notified; leave it
             # is_notified=FALSE so the very next poll retries instead of dropping
@@ -1567,12 +1609,18 @@ def process_new_filings():
         for j in jobs
     }
 
-    print(f"⏱ Caption jobs submitted: {time.monotonic() - _summary_phase_started:.2f}s")
-    # ── Phase 3: deliver ONE message per subscriber ──────────────────────
+    print(f"⏱ [timing] caption_jobs_submitted count={len(futures)} submit={time.monotonic()-_summary_phase_started:.3f}s")
+    # ── Phase 3: deliver READY captions immediately ──────────────────────
+    # Avoid head-of-line blocking: a slow old PDF must not hold a ready new filing.
     _delivery_started = time.monotonic()
-    for j in jobs:
+    future_to_job = {futures[j["file_key"]]: j for j in jobs}
+    completed = 0
+    for future in as_completed(future_to_job):
+        j = future_to_job[future]
+        completed += 1
+        ready_at = time.monotonic() - _summary_phase_started
         try:
-            caption, summary_ok = futures[j["file_key"]].result()
+            caption, summary_ok = future.result()
         except Exception as e:
             print(f"❌ Caption build failed for {j['file_key']}: {e}")
             caption = _caption_with_time(
@@ -1580,6 +1628,7 @@ def process_new_filings():
                 j["company"], j["symbol"], j["raw_time"],
             )
             summary_ok = False
+        print(f"🚦 [ready] {j['symbol']} file={j['file_key']} completed={completed}/{len(futures)} ready_after={ready_at:.2f}s summary_ok={summary_ok}")
 
         # The AI summary failed. Leave the filing is_notified=FALSE and send
         # nothing this round, so the next poll re-summarises it — the LLM
@@ -1660,9 +1709,10 @@ def process_new_filings():
             mark_notified_in_pg(j["filing_id"])
 
     print(
-        f"⏱ Cycle complete: total={time.monotonic() - _cycle_started:.2f}s "
-        f"caption_phase={time.monotonic() - _summary_phase_started:.2f}s "
-        f"delivery={time.monotonic() - _delivery_started:.2f}s"
+        f"🏁 [timing] cycle_complete total={time.monotonic()-_cycle_started:.2f}s "
+        f"filings={len(filings)} jobs={len(jobs)} "
+        f"caption_phase={time.monotonic()-_summary_phase_started:.2f}s "
+        f"delivery_phase={time.monotonic()-_delivery_started:.2f}s"
     )
 
 

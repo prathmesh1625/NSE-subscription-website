@@ -880,12 +880,13 @@ def summarize_content(
          "'Board Meeting Intimation', 'Dividend Declaration', 'Order Win'>\n"
          "IMPACT: <one word — High, Medium or Low — how price-sensitive this filing is>\n"
          "SUMMARY: <2-4 sentence plain-English summary: what the company is doing, why it "
-         "matters, and any key dates or amounts. No bullet points, no headers, no markdown.>"),
+         "matters, and any key dates or amounts. Bold 1-2 genuinely important phrases using "
+         "WhatsApp *single asterisks*. No bullet points or extra headers.>"),
         ("human", "Filing title: {filing_type}\n\nFiling content:\n\n{pdf_text}"),
     ])
 
     _summary_started = time.monotonic()
-    summary_input = pdf_text[:6000]
+    summary_input = pdf_text[:5000]
     print(
         f"[timing] content_summary START provider={provider} model={_model} "
         f"input_chars={len(summary_input)} filing_type={filing_type or 'N/A'!r}",
