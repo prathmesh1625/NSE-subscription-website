@@ -16,6 +16,8 @@ const failedRepo =
         "../repositories/failedJobRepository"
     );
 
+const config = require("../services/config");
+
 const repo =
     require(
         "../repositories/announcementRepository"
@@ -29,6 +31,21 @@ let delay = 1000;
 let cleanupCounter = 0;
 
 let cycles = 0;
+
+async function pooled(items, limit, task) {
+    const queue = items.slice();
+    const runners = [];
+    const workerCount = Math.min(Math.max(1, limit), queue.length);
+    for (let i = 0; i < workerCount; i++) {
+        runners.push((async () => {
+            while (queue.length) {
+                const job = queue.shift();
+                await task(job);
+            }
+        })());
+    }
+    await Promise.all(runners);
+}
 
 async function processJobs() {
     await heartbeat.beat(
@@ -71,87 +88,25 @@ ${delay}ms`
 
             delay = 1000;
 
-            for (
-                const job
-                of jobs
-            ) {
-
+            const batchStarted = Date.now();
+            await pooled(jobs, Number(config.downloadWorkers) || 6, async (job) => {
                 try {
-
-                    const _t0 = Date.now();
-
-                    await repo.updateStatus(
-
-                        job.url,
-
-                        "DOWNLOADING"
-
-                    );
-
-                    await download(
-
-                        job.url,
-
-                        job.filename
-
-                    );
-
-                    await repo.updateStatus(
-
-                        job.url,
-
-                        "DOWNLOADED"
-
-                    );
-
-                    await queueRepo.markDone(
-                        job.id
-                    );
-
-                    await failedRepo.removeByUrl(
-                        job.url
-                    );
-
-                    console.log(
-
-                        `Downloaded: ${job.filename} (${Date.now() - _t0}ms)`
-
-                    );
-
+                    const t0 = Date.now();
+                    await repo.updateStatus(job.url, "DOWNLOADING");
+                    await download(job.url, job.filename);
+                    await repo.updateStatus(job.url, "DOWNLOADED");
+                    await queueRepo.markDone(job.id);
+                    await failedRepo.removeByUrl(job.url);
+                    console.log(`Downloaded: ${job.filename} (${Date.now() - t0}ms)`);
                 }
                 catch (err) {
-
-                    await repo.updateStatus(
-
-                        job.url,
-
-                        "FAILED"
-
-                    );
-
-                    await queueRepo.markFailed(
-                        job.id
-                    );
-
-                    await failedRepo.add(
-
-                        job.url,
-
-                        job.filename
-
-                    );
-
-                    console.log(
-
-                        `Failed:
-${job.filename}
-${err.message}`
-
-                    );
-
+                    await repo.updateStatus(job.url, "FAILED");
+                    await queueRepo.markFailed(job.id);
+                    await failedRepo.add(job.url, job.filename);
+                    console.log(`Failed: ${job.filename}\n${err.message}`);
                 }
-
-            }
+            });
+            console.log(`[timing] download batch jobs=${jobs.length} workers=${Number(config.downloadWorkers) || 6} duration=${Date.now() - batchStarted}ms`);
 
         }
 

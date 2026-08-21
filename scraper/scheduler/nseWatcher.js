@@ -105,6 +105,7 @@ async function saveAnnouncement(
 
 async function checkAnnouncements() {
 
+    const cycleStarted = Date.now();
     metrics.increment("cycles");
 
     console.log(
@@ -160,51 +161,44 @@ async function checkAnnouncements() {
     const seenSymbols =
         new Set();
 
-    for (
-        let p = 1;
-        p <= pages;
-        p++
-    ) {
+    const feedStarted = Date.now();
+    const pageResults = await Promise.all(
+        Array.from({ length: pages }, (_, i) => fetchNsePage(i + 1))
+    );
+    console.log(`[timing] NSE global pages=${pages} duration=${Date.now() - feedStarted}ms`);
 
-        const records =
-            await fetchNsePage(p);
+    const saveJobs = [];
+    for (const records of pageResults) {
+        if (!Array.isArray(records) || records.length === 0) continue;
 
-        if (
-            !Array.isArray(records) ||
-            records.length === 0
-        ) {
-            break;
-        }
-
-        for (
-            const item
-            of records
-        ) {
-
-            const sym =
-                String(item.symbol || "")
-                    .toUpperCase()
-                    .trim();
-
-            if (
-                !subscribedSet.has(sym)
-            ) {
-                continue;
-            }
-
+        for (const item of records) {
+            const sym = String(item.symbol || "").toUpperCase().trim();
+            if (!subscribedSet.has(sym)) continue;
             seenSymbols.add(sym);
-
-            await saveAnnouncement(sym, item);
-
+            saveJobs.push(() => saveAnnouncement(sym, item));
         }
-
     }
+
+    // DB writes are independent. Keep a small pool so a burst of filings does
+    // not turn the feed cycle into a long serial chain of INSERT + job INSERT.
+    const saveQueue = saveJobs.slice();
+    const saveWorkers = [];
+    const saveConcurrency = Math.min(8, saveQueue.length);
+    for (let i = 0; i < saveConcurrency; i++) {
+        saveWorkers.push((async () => {
+            while (saveQueue.length) {
+                const save = saveQueue.shift();
+                await save();
+            }
+        })());
+    }
+    await Promise.all(saveWorkers);
 
     metrics.increment("companies", seenSymbols.size);
     metrics.print();
 
     console.log(
-        "\nNSE Cycle Complete"
+        `[timing] NSE cycle complete duration=${Date.now() - cycleStarted}ms matched_symbols=${seenSymbols.size}`
     );
 
 }

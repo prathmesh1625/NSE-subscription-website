@@ -342,34 +342,38 @@ def _run_summary(file_path: str, company: str | None = None,
 
 def generate_pdf_summary(file_path: str, company: str | None = None,
                          filing_type: str = "", download_url: str = "") -> str | None:
+    """Generate one summary directly inside the existing caption worker.
+
+    The previous implementation started a second daemon thread and joined it
+    with a hard timeout. Python cannot cancel that thread, so a timed-out LLM
+    request kept running in the background and consumed an API/worker slot.
+    That made retries slower instead of faster. The LLM clients now have real
+    request timeouts, so this function stays single-threaded and measurable.
     """
-    Generate the AI summary for one PDF, in-process, with a HARD timeout so a
-    slow/hung LLM call can never stall delivery. Returns None on any failure
-    (caller then sends the basic caption). Safe to run from several threads at
-    once (the caption pool does exactly that). `company` is used as the display
-    name when the PDF text doesn't state it (avoids "Unknown Company").
-    `filing_type` feeds the ⚡ event line and `download_url` the 📎 link.
-    """
-    print(f"🤖 Generating AI summary for {os.path.basename(file_path)}...")
-    box = {}
-
-    def _worker():
-        try:
-            box["value"] = _run_summary(file_path, company, filing_type, download_url)
-        except Exception as e:
-            box["error"] = e
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    t.join(getattr(config, "SUMMARY_TIMEOUT_SEC", 35))
-
-    if t.is_alive():
-        print(f"⏱️  Summary timed out for {os.path.basename(file_path)} — sending basic caption.")
+    started = time.monotonic()
+    file_name = os.path.basename(file_path)
+    print(
+        f"[timing] summary START file={file_name} company={company!r} type={filing_type!r}",
+        flush=True,
+    )
+    try:
+        value = _run_summary(file_path, company, filing_type, download_url)
+        elapsed = time.monotonic() - started
+        if value:
+            print(
+                f"[timing] summary DONE file={file_name} duration={elapsed:.2f}s chars={len(value)}",
+                flush=True,
+            )
+            return value
+        print(f"[timing] summary EMPTY file={file_name} duration={elapsed:.2f}s", flush=True)
         return None
-    if "error" in box:
-        print(f"❌ Summary failed for {os.path.basename(file_path)}: {box['error']}")
+    except Exception as e:
+        print(
+            f"[timing] summary FAIL file={file_name} duration={time.monotonic()-started:.2f}s "
+            f"error={type(e).__name__}: {e}",
+            flush=True,
+        )
         return None
-    return box.get("value")
 
 
 def _format_exchange_time(raw) -> str:
@@ -457,7 +461,7 @@ def _format_exchange_time(raw) -> str:
 #       "Jun 2026 Results Out" with a padded third period — Mar 2026 and
 #       Jun 2025 carrying the same value, QoQ identical to YoY. A v10 cache for
 #       one holds that fabricated metrics table and must not be re-sent.
-SUMMARY_FORMAT_VERSION = 11
+SUMMARY_FORMAT_VERSION = 12
 
 
 
@@ -859,9 +863,12 @@ def _full_caption_ex(company, symbol, filing_type, file_path, raw_time,
     # Show a branded short link under our own domain instead of the raw NSE URL.
     download_url = _shorten_download_url(download_url)
     fallback = _no_summary_caption(company, symbol, filing_type, download_url)
+    started = time.monotonic()
     body, summary_ok = _build_caption(file_path, fallback, company,
                                       filing_type=filing_type,
                                       download_url=download_url)
+    elapsed = time.monotonic() - started
+    print(f"[timing] caption DONE symbol={symbol} file={os.path.basename(file_path)} duration={elapsed:.2f}s summary_ok={summary_ok}", flush=True)
     return _caption_with_time(body, company, symbol, raw_time), summary_ok
 
 
@@ -1537,6 +1544,7 @@ def process_new_filings():
     instead of the later ones queuing for minutes.
     """
     _cycle_started = time.monotonic()
+    print("[timing] live_cycle START", flush=True)
     filings = fetch_new_filings()
     filings = _dedup_by_filename(filings)
     if not filings:

@@ -20,7 +20,8 @@ const BROWSER_HEADERS = {
 
 let cookieHeader = "";
 let lastRefresh = 0;
-const REFRESH_EVERY_MS = 5 * 60 * 1000;   // proactively re-prime every 5 min
+const REFRESH_EVERY_MS = 30 * 60 * 1000;  // avoid blocking every 5 min on a cookie refresh
+const REFRESH_FAILURE_GRACE_MS = 60 * 1000;
 
 let inflight = null;
 
@@ -44,7 +45,10 @@ async function _doRefresh() {
             console.log("NSE cookie refresh returned no Set-Cookie header.");
         }
     } catch (err) {
-        console.log(`NSE cookie refresh failed: ${err.message}`);
+        // Keep the last known-good cookies. Mark the attempt time so a transient
+        // NSE outage does not cause every API request to wait another 12s.
+        lastRefresh = Date.now();
+        console.log(`NSE cookie refresh failed: ${err.message} — using cached cookies=${Boolean(cookieHeader)}`);
     }
     return cookieHeader;
 }
@@ -60,8 +64,14 @@ async function refresh() {
 
 /** Cookie header string for NSE API calls; refreshes if missing/stale. */
 async function getCookieHeader() {
-    if (!cookieHeader || Date.now() - lastRefresh > REFRESH_EVERY_MS) {
+    const age = Date.now() - lastRefresh;
+    if (!cookieHeader) {
         await refresh();
+    } else if (age > REFRESH_EVERY_MS) {
+        await refresh();
+    } else if (age < REFRESH_FAILURE_GRACE_MS) {
+        // A recent failed refresh should never block the hot path again.
+        return cookieHeader;
     }
     return cookieHeader;
 }

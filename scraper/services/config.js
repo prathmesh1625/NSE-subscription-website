@@ -21,7 +21,7 @@ module.exports = {
         Number(
             process.env.INTERVAL
             ||
-            20000
+            10000
         ),
 
     // How many pages of NSE's GLOBAL announcements feed to pull each cycle.
@@ -65,7 +65,7 @@ module.exports = {
 
             process.env.DOWNLOAD_WORKERS
             ||
-            10
+            6
 
         ),
     maxQueueSize:

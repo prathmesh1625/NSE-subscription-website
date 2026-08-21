@@ -33,7 +33,7 @@ async function _request(pageNo) {
                 "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
                 ...(cookie ? { "Cookie": cookie } : {}),
             },
-            timeout: 8000,
+            timeout: Number(process.env.NSE_REQUEST_TIMEOUT_MS || 6000),
             validateStatus: () => true,   // inspect status ourselves
         }
     );
@@ -41,6 +41,7 @@ async function _request(pageNo) {
 
 async function fetchNsePage(pageNo) {
     return limiter.execute(async () => {
+        const started = Date.now();
         try {
             let res = await _request(pageNo);
 
@@ -58,9 +59,10 @@ async function fetchNsePage(pageNo) {
                 return Array.isArray(res.data) ? res.data : [];
             }
 
+            console.log(`[timing] NSE page=${pageNo} duration=${Date.now() - started}ms rows=${res.data.length}`);
             return res.data;
         } catch (err) {
-            console.log(`NSE global feed page ${pageNo} failed: ${err.message}`);
+            console.log(`[timing] NSE page=${pageNo} FAILED duration=${Date.now() - started}ms error=${err.message}`);
             return [];
         }
     });
