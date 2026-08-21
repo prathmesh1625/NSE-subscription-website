@@ -19,6 +19,8 @@ async function flush() {
         ];
 
     queue = [];
+    
+    const flushStart = Date.now();
 
     await Promise.all(
 
@@ -27,11 +29,12 @@ async function flush() {
         )
 
     );
+    
+    const flushTime = ((Date.now() - flushStart) / 1000).toFixed(2);
 
     console.log(
 
-        `Batch Saved:
-${copy.length}`
+        `💾 Batch Saved: ${copy.length} filings in ${flushTime}s`
 
     );
 

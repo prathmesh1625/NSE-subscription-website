@@ -15,6 +15,7 @@ const config = require("./config");
  */
 async function downloadPdf(url, filename) {
 
+    const downloadStart = Date.now();
     const response = await client.get(url, {
         responseType: "arraybuffer",
         timeout: 60000,
@@ -47,6 +48,9 @@ async function downloadPdf(url, filename) {
 
     fs.writeFileSync(tempPath, body);
     fs.renameSync(tempPath, finalPath);
+    
+    const downloadTime = ((Date.now() - downloadStart) / 1000).toFixed(2);
+    console.log(`✅ BSE Downloaded: ${filename} in ${downloadTime}s (${(body.length / 1024).toFixed(1)}KB)`);
 
     return { path: finalPath, bytes: body.length };
 

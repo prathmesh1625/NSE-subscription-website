@@ -111,6 +111,11 @@ def fetch_new_filings():
         query_time = time.time() - query_start
         if rows:
             print(f"⏱️ [DB Query] Fetched {len(rows)} new filings in {query_time:.3f}s")
+            # Show filing ages to diagnose delays
+            for row in rows:
+                age = row.get('age_seconds', 0)
+                symbol = row.get('symbol', 'UNKNOWN')
+                print(f"   📊 {symbol}: {age}s old (created {age}s ago)")
 
         resolved = []
         for row in rows:

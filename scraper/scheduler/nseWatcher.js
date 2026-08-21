@@ -46,6 +46,7 @@ async function saveAnnouncement(
     }
 
     processing.add(item.attchmntFile);
+    const discoveryTime = Date.now();
 
     try {
 
@@ -81,9 +82,11 @@ async function saveAnnouncement(
         ) {
             return;
         }
+        
+        const saveTime = ((Date.now() - discoveryTime) / 1000).toFixed(3);
 
         console.log(
-            `\nNSE Queued: ${symbol}\nTitle: ${item.desc}`
+            `\n🆕 NSE NEW ANNOUNCEMENT: ${symbol} (${item.desc}) - Saved to DB in ${saveTime}s`
         );
 
         metrics.increment("downloads");
@@ -105,10 +108,11 @@ async function saveAnnouncement(
 
 async function checkAnnouncements() {
 
+    const cycleStart = Date.now();
     metrics.increment("cycles");
 
     console.log(
-        "\n=== NSE Cycle ==="
+        "\n⏰ === NSE CYCLE START ==="
     );
 
     // Circuit breaker — don't pile on if downloads are badly backed up.
@@ -200,11 +204,12 @@ async function checkAnnouncements() {
 
     }
 
+    const cycleTime = ((Date.now() - cycleStart) / 1000).toFixed(2);
     metrics.increment("companies", seenSymbols.size);
     metrics.print();
 
     console.log(
-        "\nNSE Cycle Complete"
+        `\n✅ NSE Cycle Complete in ${cycleTime}s (found ${seenSymbols.size} new announcements)`
     );
 
 }

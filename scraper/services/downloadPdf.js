@@ -9,8 +9,9 @@ async function downloadPdf(
     url,
     filename
 ) {
+    const downloadStart = Date.now();
     console.log(
-        `Downloading: ${filename}`
+        `⬇️  Downloading: ${filename}`
     );
     const referer =
 
@@ -66,11 +67,9 @@ async function downloadPdf(
         filePath,
         response.data
     );
+    const downloadTime = ((Date.now() - downloadStart) / 1000).toFixed(2);
     console.log(
-        `Saved: ${filename}`
-    );
-    console.log(
-        "Saved locally"
+        `✅ Saved: ${filename} in ${downloadTime}s`
     );
 
 }
