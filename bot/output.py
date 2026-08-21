@@ -1,3 +1,12 @@
+# ============================================================
+# OPTIMIZED DELIVERY BUILD
+# - Faster OCR defaults
+# - Smaller LLM input budgets
+# - Shorter LLM timeouts
+# - Deterministic WhatsApp bolding for important figures/facts
+# - Extra extraction timing log
+# ============================================================
+
 """
 EquityAlerts Result Bits - PDF Financial Extractor
 ================================================
@@ -115,21 +124,21 @@ def _extract_pages_pdfplumber(pdf_path: str) -> list:
 # a results table, so a normal text-layer filing pays nothing for this.
 
 OCR_ENABLED = os.getenv("OCR_ENABLED", "true").strip().lower() not in ("false", "0", "no")
-OCR_DPI     = int(os.getenv("OCR_DPI", "300"))          # 300 is tesseract's sweet spot for print
+OCR_DPI     = int(os.getenv("OCR_DPI", "220"))          # 300 is tesseract's sweet spot for print
 OCR_LANGS   = os.getenv("OCR_LANGS", "eng")             # e.g. "eng+hin" for Hindi editions
 # Newspaper intimations run 1-4 pages; a fully scanned results statement more.
-OCR_MAX_PAGES       = int(os.getenv("OCR_MAX_PAGES", "4"))
+OCR_MAX_PAGES       = int(os.getenv("OCR_MAX_PAGES", "3"))
 # Wall-clock ceiling for ALL OCR of one document. This runs INSIDE
 # config.SUMMARY_TIMEOUT_SEC together with the two LLM calls, so it must leave
 # room for them — see the budget note on SUMMARY_TIMEOUT_SEC in config.py.
-OCR_TIME_BUDGET_SEC = int(os.getenv("OCR_TIME_BUDGET_SEC", "8"))
+OCR_TIME_BUDGET_SEC = int(os.getenv("OCR_TIME_BUDGET_SEC", "6"))
 
 # ── LLM call budget (shared by every provider; kept short to prevent a single filing from monopolising a worker) ───────────────────────────────
 # Retries are exponentially backed off by the provider SDK, so these ride out a
 # short 429 burst rather than failing the filing. Worst case
 # (LLM_TIMEOUT_SEC * (LLM_MAX_RETRIES + 1)) still has to fit inside
 # config.SUMMARY_TIMEOUT_SEC, which hard-caps the whole summary.
-LLM_TIMEOUT_SEC  = int(os.getenv("LLM_TIMEOUT_SEC", "15"))
+LLM_TIMEOUT_SEC  = int(os.getenv("LLM_TIMEOUT_SEC", "10"))
 LLM_MAX_RETRIES  = int(os.getenv("LLM_MAX_RETRIES", "0"))
 
 # A page with less real text than this contributes nothing and is a scan.
@@ -466,7 +475,7 @@ EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
 # summarize_content when extraction fails; a retry of a call this size just
 # burns the rest of that budget, so the fallback never got to run and the
 # filing went out with an EMPTY body. Extraction must fail FAST and leave room.
-RESULT_EXTRACT_TIMEOUT_SEC = int(os.getenv("RESULT_EXTRACT_TIMEOUT_SEC", "18"))
+RESULT_EXTRACT_TIMEOUT_SEC = int(os.getenv("RESULT_EXTRACT_TIMEOUT_SEC", "12"))
 
 
 # ── Provider → default model mapping ─────────────────────────────────────────
@@ -541,7 +550,7 @@ def extract_financials(
     schema_str = json.dumps(FinancialSummary.model_json_schema(), indent=2)
 
     # Limit text size to prevent exceeding context or free rate limits (e.g. Groq TPM is small)
-    max_chars = int(os.getenv("RESULT_MAX_CHARS", "50000")) if provider != "groq" else 20000
+    max_chars = int(os.getenv("RESULT_MAX_CHARS", "35000")) if provider != "groq" else 18000
 
     # We report the CONSOLIDATED (group) statement, but filings print the
     # standalone one first — on a long filing the consolidated table would be
@@ -593,6 +602,31 @@ PUREFRAME_AD = (
 
 BRAND_NAME = "EquityAlerts"
 
+
+def _bold_important(text: str) -> str:
+    """Bold important financial facts for WhatsApp without another LLM call."""
+    if not text:
+        return ""
+
+    protected = []
+
+    def protect(match):
+        protected.append(match.group(0))
+        return f"\x00B{len(protected)-1}\x00"
+
+    s = re.sub(r"\*[^*\n]+\*", protect, str(text))
+
+    patterns = (
+        r'(?<![\w*])(?:₹|Rs\.?\s*)[\d,]+(?:\.\d+)?(?:\s*(?:Cr|crore|Lakh|Lakhs|Million|Billion))?(?![\w*])',
+        r'(?<![\w*])[+-]?\d+(?:\.\d+)?%(?![\w*])',
+        r'(?<![\w*])(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}-\d{2}-\d{2})(?![\w*])',
+        r'(?<![\w*])(?:High|Medium|Low)\s+Impact(?![\w*])',
+    )
+    for pattern in patterns:
+        s = re.sub(pattern, lambda m: f"*{m.group(0)}*", s)
+
+    return re.sub(r"\x00B(\d+)\x00",
+                  lambda m: protected[int(m.group(1))], s)
 
 def _impact_hashtag(impact: str) -> str:
     """'low' → ' #LowImpact'. Empty/unknown → ''."""
@@ -659,9 +693,9 @@ def _build_stock_bits_message(
     lines.append(f"🏢 {company_name}")
     lines.append("")
     if event:
-        lines.append(f"⚡ {event}")
+        lines.append(f"⚡ *{event}*")
         lines.append("")
-    lines.append(f"🤖 {body}{_impact_hashtag(impact)}")
+    lines.append(f"🤖 {_bold_important(body)}{_impact_hashtag(impact)}")
     lines.append("")
 
     link_added = False
@@ -765,19 +799,19 @@ def format_whatsapp_message(
     """
     lines = [f"📢 *{BRAND_NAME} Result Bits!!*", ""]
     lines.append(
-        f"💼 {summary.company_name}{_basis_suffix(summary.basis)} "
-        f"| {summary.reporting_period} Results Out"
+        f"💼 *{summary.company_name}*{_basis_suffix(summary.basis)} "
+        f"| *{summary.reporting_period} Results Out*"
     )
     lines.append("")
-    lines.append("📊 Key Metrics")
+    lines.append("📊 *Key Metrics*")
     for m in summary.metrics:
         lines.append("")
-        lines.append(_metric_label(m.name, m.short_name))
+        lines.append(f"*{_metric_label(m.name, m.short_name)}*")
         for p in m.periods:
-            lines.append(f"🗓️ {p.period_label}: {p.value}")
+            lines.append(f"🗓️ {p.period_label}: *{p.value}*")
         lines.append(
-            f"{_trend_emoji(m.qoq_change)} {_format_change(m.qoq_change)} QoQ, "
-            f"{_trend_emoji(m.yoy_change)} {_format_change(m.yoy_change)} YoY"
+            f"{_trend_emoji(m.qoq_change)} *{_format_change(m.qoq_change)} QoQ*, "
+            f"{_trend_emoji(m.yoy_change)} *{_format_change(m.yoy_change)} YoY*"
         )
 
     lines.append("")
@@ -860,7 +894,7 @@ def summarize_content(
     ])
 
     result = (prompt | llm).invoke({
-        "pdf_text": pdf_text[:8000],
+        "pdf_text": pdf_text[:6000].strip(),
         "filing_type": filing_type or "N/A",
     })
     raw = result.content.strip() if hasattr(result, "content") else str(result).strip()
@@ -1791,6 +1825,7 @@ def process_pdf(
             "Try a text-layer PDF."
         )
     print(f"      Extracted {len(pdf_text):,} characters.", file=sys.stderr)
+    print(f"      ⏱ Total extraction stage: {_time.monotonic() - _pipeline_started:.2f}s", file=sys.stderr)
 
     # Step 2: LLM financial extraction — ONLY for genuine results documents.
     _model_name = model or PROVIDER_DEFAULTS.get(provider, "default")
