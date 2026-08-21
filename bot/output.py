@@ -29,6 +29,7 @@ import re
 import sys
 import urllib.request
 import tempfile
+from functools import lru_cache
 
 # ── LangChain ────────────────────────────────────────────────────────────────
 from langchain_core.prompts import ChatPromptTemplate
@@ -117,19 +118,19 @@ OCR_ENABLED = os.getenv("OCR_ENABLED", "true").strip().lower() not in ("false", 
 OCR_DPI     = int(os.getenv("OCR_DPI", "300"))          # 300 is tesseract's sweet spot for print
 OCR_LANGS   = os.getenv("OCR_LANGS", "eng")             # e.g. "eng+hin" for Hindi editions
 # Newspaper intimations run 1-4 pages; a fully scanned results statement more.
-OCR_MAX_PAGES       = int(os.getenv("OCR_MAX_PAGES", "10"))
+OCR_MAX_PAGES       = int(os.getenv("OCR_MAX_PAGES", "4"))
 # Wall-clock ceiling for ALL OCR of one document. This runs INSIDE
 # config.SUMMARY_TIMEOUT_SEC together with the two LLM calls, so it must leave
 # room for them — see the budget note on SUMMARY_TIMEOUT_SEC in config.py.
-OCR_TIME_BUDGET_SEC = int(os.getenv("OCR_TIME_BUDGET_SEC", "25"))
+OCR_TIME_BUDGET_SEC = int(os.getenv("OCR_TIME_BUDGET_SEC", "8"))
 
-# ── LLM call budget (shared by every provider) ───────────────────────────────
+# ── LLM call budget (shared by every provider; kept short to prevent a single filing from monopolising a worker) ───────────────────────────────
 # Retries are exponentially backed off by the provider SDK, so these ride out a
 # short 429 burst rather than failing the filing. Worst case
 # (LLM_TIMEOUT_SEC * (LLM_MAX_RETRIES + 1)) still has to fit inside
 # config.SUMMARY_TIMEOUT_SEC, which hard-caps the whole summary.
-LLM_TIMEOUT_SEC  = int(os.getenv("LLM_TIMEOUT_SEC", "40"))
-LLM_MAX_RETRIES  = int(os.getenv("LLM_MAX_RETRIES", "5"))
+LLM_TIMEOUT_SEC  = int(os.getenv("LLM_TIMEOUT_SEC", "15"))
+LLM_MAX_RETRIES  = int(os.getenv("LLM_MAX_RETRIES", "0"))
 
 # A page with less real text than this contributes nothing and is a scan.
 _MIN_PAGE_CHARS = 40
@@ -465,7 +466,7 @@ EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
 # summarize_content when extraction fails; a retry of a call this size just
 # burns the rest of that budget, so the fallback never got to run and the
 # filing went out with an EMPTY body. Extraction must fail FAST and leave room.
-RESULT_EXTRACT_TIMEOUT_SEC = int(os.getenv("RESULT_EXTRACT_TIMEOUT_SEC", "45"))
+RESULT_EXTRACT_TIMEOUT_SEC = int(os.getenv("RESULT_EXTRACT_TIMEOUT_SEC", "18"))
 
 
 # ── Provider → default model mapping ─────────────────────────────────────────
@@ -478,6 +479,7 @@ PROVIDER_DEFAULTS = {
 }
 
 
+@lru_cache(maxsize=8)
 def build_chain(provider: str = "google", model: str | None = None):
     """Build the LangChain extraction chain for the given LLM provider."""
     _model = model or PROVIDER_DEFAULTS.get(provider)
@@ -539,7 +541,7 @@ def extract_financials(
     schema_str = json.dumps(FinancialSummary.model_json_schema(), indent=2)
 
     # Limit text size to prevent exceeding context or free rate limits (e.g. Groq TPM is small)
-    max_chars = 20000 if provider == "groq" else 80000
+    max_chars = int(os.getenv("RESULT_MAX_CHARS", "50000")) if provider != "groq" else 20000
 
     # We report the CONSOLIDATED (group) statement, but filings print the
     # standalone one first — on a long filing the consolidated table would be
@@ -810,11 +812,11 @@ def summarize_content(
     # sends several summaries at once (SUMMARY_WORKERS) and a results filing
     # alone costs ~20k tokens via extract_financials, which is enough to reach
     # a 200k TPM account limit — so 429s arrive in clusters, not one at a time.
-    # At the old openai settings (timeout 25, max_retries 1) two attempts a few
-    # seconds apart both landed inside the same rate-limited window and the
+    # At high retry settings, multiple attempts a few
+    # seconds apart can land inside the same rate-limited window and the
     # filing went out with no summary at all, permanently. The retries are
     # exponentially backed off by each SDK, so this rides out a short burst.
-    # Well inside config.SUMMARY_TIMEOUT_SEC (120s), which still hard-caps it.
+    # Well inside config.SUMMARY_TIMEOUT_SEC (25s), which still hard-caps it.
     if provider in ("google", "gemini"):
         from langchain_google_genai import ChatGoogleGenerativeAI
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -1773,8 +1775,12 @@ def process_pdf(
     else:
         pdf_path = pdf_source
 
+    import time as _time
+    _pipeline_started = _time.monotonic()
     try:
+        _extract_started = _time.monotonic()
         pdf_text = extract_text_from_pdf_file(pdf_path)
+        print(f"      ⏱ PDF extraction: {_time.monotonic() - _extract_started:.2f}s", file=sys.stderr)
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -1801,7 +1807,9 @@ def process_pdf(
         print(f"[2/3] Results document detected — extracting financials via "
               f"{provider} / {_model_name} ...", file=sys.stderr)
         try:
+            _llm_started = _time.monotonic()
             summary = extract_financials(pdf_text, provider=provider, model=model)
+            print(f"      ⏱ Financial LLM: {_time.monotonic() - _llm_started:.2f}s", file=sys.stderr)
             extracted_name = summary.company_name or ""
             if (company_hint and extracted_name
                     and not _names_plausibly_match(company_hint, extracted_name)):
@@ -1895,11 +1903,13 @@ def process_pdf(
     # Step 3: Format — use financial summary if metrics found, else plain content summary
     print("[3/3] Formatting WhatsApp message...", file=sys.stderr)
     if summary and summary.metrics:
+        print(f"      ⏱ Total PDF pipeline: {_time.monotonic() - _pipeline_started:.2f}s", file=sys.stderr)
         return format_whatsapp_message(summary, equisense_url=equisense_url,
                                        short_url=short_url, download_url=download_url)
 
     print("      No financial metrics — generating content summary instead.", file=sys.stderr)
-    return summarize_content(pdf_text, company_name=company, provider=provider,
+    _content_started = _time.monotonic()
+    result_message = summarize_content(pdf_text, company_name=company, provider=provider,
                              model=model, equisense_url=equisense_url,
                              filing_type=filing_type, download_url=download_url,
                              short_url=short_url)

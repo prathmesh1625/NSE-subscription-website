@@ -67,9 +67,15 @@ def _sanitize_template_param(text: str) -> str:
     """
     Flatten a (possibly multi-line) string so Meta accepts it as a template
     body parameter. Collapses all whitespace runs — including newlines and
-    tabs — into single spaces and truncates to TEMPLATE_PARAM_MAX_LEN.
+    tabs — into single spaces, strips markdown formatting (*bold*, _italic_),
+    and truncates to TEMPLATE_PARAM_MAX_LEN.
+    
+    WhatsApp templates don't support markdown in parameters - Meta rejects them
+    with error code 100 (Invalid parameter).
     """
     flattened = re.sub(r"\s+", " ", str(text or "")).strip()
+    # Strip markdown formatting: *bold* and _italic_
+    flattened = re.sub(r"[*_]", "", flattened)
     if len(flattened) > TEMPLATE_PARAM_MAX_LEN:
         flattened = flattened[:TEMPLATE_PARAM_MAX_LEN - 1].rstrip() + "…"
     return flattened or "NSE filing"

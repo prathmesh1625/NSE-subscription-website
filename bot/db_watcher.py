@@ -1493,10 +1493,16 @@ def process_new_filings():
     as ONE summary, not N — so every PDF lands with its summary within ~1 minute
     instead of the later ones queuing for minutes.
     """
+    _cycle_started = time.monotonic()
     filings = fetch_new_filings()
     filings = _dedup_by_filename(filings)
     if not filings:
         return
+
+    # Subscriber membership is stable during one polling cycle. Reusing it
+    # avoids opening a PostgreSQL connection once per filing when several
+    # filings belong to the same company.
+    _subscriber_cache = {}
 
     # ── Phase 1: resolve subscribers / drop undeliverable filings ────────
     jobs = []
@@ -1507,7 +1513,13 @@ def process_new_filings():
         file_path   = filing["file_path"]
         filing_type = filing.get("filing_type") or "New Filing"
 
-        subscribers = get_subscribers_for_symbol_pg(symbol)
+        if symbol in _subscriber_cache:
+            subscribers = _subscriber_cache[symbol]
+        else:
+            _lookup_started = time.monotonic()
+            subscribers = get_subscribers_for_symbol_pg(symbol)
+            _subscriber_cache[symbol] = subscribers
+            print(f"⏱ Subscriber lookup {symbol}: {time.monotonic() - _lookup_started:.2f}s")
         if subscribers is None:
             # Lookup FAILED (transient DB error) — do NOT mark notified; leave it
             # is_notified=FALSE so the very next poll retries instead of dropping
@@ -1544,7 +1556,9 @@ def process_new_filings():
     if not jobs:
         return
 
+    print(f"⏱ Phase 1 (DB/subscribers): {time.monotonic() - _cycle_started:.2f}s")
     # ── Phase 2: build all captions concurrently (summary + exchange time) ─
+    _summary_phase_started = time.monotonic()
     futures = {
         j["file_key"]: _caption_pool.submit(
             _full_caption_ex, j["company"], j["symbol"], j["filing_type"],
@@ -1553,7 +1567,9 @@ def process_new_filings():
         for j in jobs
     }
 
+    print(f"⏱ Caption jobs submitted: {time.monotonic() - _summary_phase_started:.2f}s")
     # ── Phase 3: deliver ONE message per subscriber ──────────────────────
+    _delivery_started = time.monotonic()
     for j in jobs:
         try:
             caption, summary_ok = futures[j["file_key"]].result()
@@ -1642,6 +1658,12 @@ def process_new_filings():
         # anyone still missing it (already-sent users are skipped above).
         if all_sent:
             mark_notified_in_pg(j["filing_id"])
+
+    print(
+        f"⏱ Cycle complete: total={time.monotonic() - _cycle_started:.2f}s "
+        f"caption_phase={time.monotonic() - _summary_phase_started:.2f}s "
+        f"delivery={time.monotonic() - _delivery_started:.2f}s"
+    )
 
 
 # ── Automatic backfill for subscribers ───────────────────────

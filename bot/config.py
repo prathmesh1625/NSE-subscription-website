@@ -57,9 +57,9 @@ BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 
 # on timeout we send the PDF with the basic caption (company + exchange time +
 # title) instead. Cost is not a concern, so this is generous.
 #
-# REDUCED from 120s to 30s for FASTER delivery - we prioritize speed over perfect summaries
+# REDUCED to 25s for FASTER delivery - we prioritize speed over perfect summaries
 # If summary fails, we retry on next poll (SUMMARY_RETRY_ATTEMPTS) or send basic caption
-SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 30))
+SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 25))
 
 # When the AI summary fails, hold the filing back and re-summarise it on the
 # next poll instead of shipping the degraded "summary isn't available" caption.
@@ -67,12 +67,12 @@ SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 30))
 # REDUCED retry attempts from 3 to 1 for FASTER delivery - we prioritize speed
 # If summary fails once, we send the basic caption rather than waiting for retries
 SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 1))
-SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 60))
+SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 45))
 
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
-# INCREASED from 6 to 10 for faster parallel processing during announcement bursts
-SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 10))
+# Kept at 4 to avoid LLM/API contention during announcement bursts
+SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 4))
 
 # LLM used for the AI summary (in-process via output.py / LangChain).
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
