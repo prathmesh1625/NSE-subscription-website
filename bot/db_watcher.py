@@ -319,6 +319,13 @@ def _run_summary(file_path: str, company: str | None = None,
     return msg or None
 
 
+# Shared gate for every in-process LLM summary, including the background
+# SummaryAgent. This prevents two independent pools from creating an API burst
+# that causes 429s/timeouts and makes the live path wait behind background work.
+_SUMMARY_LLM_CONCURRENCY = max(1, int(getattr(config, "SUMMARY_WORKERS", 4)))
+_summary_llm_gate = threading.BoundedSemaphore(_SUMMARY_LLM_CONCURRENCY)
+
+
 def generate_pdf_summary(file_path: str, company: str | None = None,
                          filing_type: str = "", download_url: str = "") -> str | None:
     """
@@ -335,10 +342,16 @@ def generate_pdf_summary(file_path: str, company: str | None = None,
     box = {}
 
     def _worker():
+        acquired = _summary_llm_gate.acquire(timeout=getattr(config, "SUMMARY_TIMEOUT_SEC", 20))
+        if not acquired:
+            box["error"] = TimeoutError("summary concurrency gate timeout")
+            return
         try:
             box["value"] = _run_summary(file_path, company, filing_type, download_url)
         except Exception as e:
             box["error"] = e
+        finally:
+            _summary_llm_gate.release()
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()

@@ -72,14 +72,18 @@ SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 40))
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
 # Kept at 4 to avoid LLM/API contention during announcement bursts
-SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 6))
+SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 4))
 
 # LLM used for the AI summary (in-process via output.py / LangChain).
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
 SUMMARY_MODEL    = os.environ.get("SUMMARY_MODEL", "gpt-4o-mini")
 # Background pre-generation keeps summaries warm in SQLite before live delivery.
 ENABLE_SUMMARY_AGENT = os.environ.get("ENABLE_SUMMARY_AGENT", "True").lower() in ("true", "1", "yes")
-SUMMARY_AGENT_INTERVAL_SEC = int(os.environ.get("SUMMARY_AGENT_INTERVAL_SEC", 60))
+SUMMARY_AGENT_INTERVAL_SEC = int(os.environ.get("SUMMARY_AGENT_INTERVAL_SEC", 90))
+# Background pre-generation must not consume the entire live-summary budget.
+SUMMARY_AGENT_WORKERS = int(os.environ.get("SUMMARY_AGENT_WORKERS", 1))
+SUMMARY_AGENT_MAX_CANDIDATES = int(os.environ.get("SUMMARY_AGENT_MAX_CANDIDATES", 20))
+SUMMARY_AGENT_MIN_AGE_SEC = int(os.environ.get("SUMMARY_AGENT_MIN_AGE_SEC", 30))
 
 
 # ── OpenAI cost visibility (Central Dashboard) ───────────────
