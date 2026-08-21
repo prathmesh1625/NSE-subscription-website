@@ -29,6 +29,21 @@ except Exception as _mc_err:      # Pillow missing, etc. — degrade to raw PDFs
     message_card = None
     print(f"⚠️  message_card unavailable ({_mc_err}); will send raw filing PDFs.")
 
+# Lightweight production timing logs. Uses monotonic time so clock changes do not
+# affect durations. Disable with ENABLE_TIMING_LOGS=False if needed.
+def _timing_enabled():
+    return getattr(config, "ENABLE_TIMING_LOGS", True)
+
+
+def _timing(label, started, **fields):
+    if not _timing_enabled():
+        return
+    elapsed = time.monotonic() - started
+    extra = " ".join(f"{k}={v}" for k, v in fields.items())
+    print(f"⏱️ [TIMING] {label}: {elapsed:.3f}s" +
+          (f" {extra}" if extra else ""))
+
+
 
 def get_pg_conn():
     """Connect to the JS scraper's PostgreSQL database."""
@@ -83,7 +98,6 @@ def _dedup_by_filename(rows):
 
 
 def fetch_new_filings():
-    _started = time.monotonic()
     try:
         conn = get_pg_conn()
         cur  = conn.cursor()
@@ -114,11 +128,10 @@ def fetch_new_filings():
             rel = row.get("file_path") or ""
             row["file_path"] = os.path.join(config.SCRAPER_BASE_PATH, rel.strip())
             resolved.append(row)
-        print(f"⏱ [timing] fetch_new_filings rows={len(resolved)} duration={time.monotonic()-_started:.2f}s")
         return resolved
 
     except Exception as e:
-        print(f"❌ [timing] fetch_new_filings FAILED duration={time.monotonic()-_started:.2f}s error={e}")
+        print(f"❌ PostgreSQL error while fetching filings: {e}")
         return []
 
 
@@ -190,40 +203,6 @@ def get_subscribers_for_symbol_pg(symbol: str) -> list:
         # as "no subscribers" used to mark the filing notified and drop it to the
         # slow 10-min backfill — the cause of occasional very-late deliveries.
         print(f"❌ Error fetching PG subscribers for {symbol}: {e}")
-        return None
-
-
-def get_subscribers_for_symbols_pg(symbols: list[str]) -> dict[str, list]:
-    """Fetch subscribers for all symbols in ONE PostgreSQL connection."""
-    normalized = sorted({(x or "").upper().strip() for x in symbols if (x or "").strip()})
-    if not normalized:
-        return {}
-    started = time.monotonic()
-    try:
-        conn = psycopg2.connect(
-            host=config.DB_HOST, port=config.DB_PORT, dbname="nse_subscription",
-            user=config.DB_USER, password=config.DB_PASSWORD,
-        )
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT UPPER(c.symbol) AS symbol, u.mobile
-            FROM user_companies uc
-            JOIN users u ON u.id = uc.user_id
-            JOIN companies c ON c.id = uc.company_id
-            JOIN subscriptions s ON s.user_id = u.id
-            WHERE UPPER(c.symbol) = ANY(%s) AND s.status = 'ACTIVE';
-        """, (normalized,))
-        rows = cur.fetchall()
-        cur.close(); conn.close()
-        result = {symbol: [] for symbol in normalized}
-        for symbol, raw_phone in rows:
-            phone=(raw_phone or "").strip()
-            if len(phone)==10 and phone.isdigit(): phone="91"+phone
-            if phone: result.setdefault(symbol, []).append(phone)
-        print(f"⏱ [timing] subscriber_batch symbols={len(normalized)} rows={len(rows)} duration={time.monotonic()-started:.2f}s")
-        return result
-    except Exception as e:
-        print(f"❌ [timing] subscriber_batch FAILED symbols={len(normalized)} duration={time.monotonic()-started:.2f}s error={type(e).__name__}: {e}")
         return None
 
 
@@ -342,38 +321,39 @@ def _run_summary(file_path: str, company: str | None = None,
 
 def generate_pdf_summary(file_path: str, company: str | None = None,
                          filing_type: str = "", download_url: str = "") -> str | None:
-    """Generate one summary directly inside the existing caption worker.
-
-    The previous implementation started a second daemon thread and joined it
-    with a hard timeout. Python cannot cancel that thread, so a timed-out LLM
-    request kept running in the background and consumed an API/worker slot.
-    That made retries slower instead of faster. The LLM clients now have real
-    request timeouts, so this function stays single-threaded and measurable.
     """
-    started = time.monotonic()
+    Generate the AI summary for one PDF, in-process, with a HARD timeout so a
+    slow/hung LLM call can never stall delivery. Returns None on any failure
+    (caller then sends the basic caption). Safe to run from several threads at
+    once (the caption pool does exactly that). `company` is used as the display
+    name when the PDF text doesn't state it (avoids "Unknown Company").
+    `filing_type` feeds the ⚡ event line and `download_url` the 📎 link.
+    """
     file_name = os.path.basename(file_path)
-    print(
-        f"[timing] summary START file={file_name} company={company!r} type={filing_type!r}",
-        flush=True,
-    )
-    try:
-        value = _run_summary(file_path, company, filing_type, download_url)
-        elapsed = time.monotonic() - started
-        if value:
-            print(
-                f"[timing] summary DONE file={file_name} duration={elapsed:.2f}s chars={len(value)}",
-                flush=True,
-            )
-            return value
-        print(f"[timing] summary EMPTY file={file_name} duration={elapsed:.2f}s", flush=True)
+    started = time.monotonic()
+    print(f"🤖 Generating AI summary for {file_name}...")
+    box = {}
+
+    def _worker():
+        try:
+            box["value"] = _run_summary(file_path, company, filing_type, download_url)
+        except Exception as e:
+            box["error"] = e
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(getattr(config, "SUMMARY_TIMEOUT_SEC", 35))
+
+    if t.is_alive():
+        _timing("summary TIMEOUT", started, file=file_name)
+        print(f"⏱️  Summary timed out for {file_name} — sending basic caption.")
         return None
-    except Exception as e:
-        print(
-            f"[timing] summary FAIL file={file_name} duration={time.monotonic()-started:.2f}s "
-            f"error={type(e).__name__}: {e}",
-            flush=True,
-        )
+    if "error" in box:
+        _timing("summary FAILED", started, file=file_name)
+        print(f"❌ Summary failed for {file_name}: {box['error']}")
         return None
+    _timing("summary", started, file=file_name, ok=bool(box.get("value")))
+    return box.get("value")
 
 
 def _format_exchange_time(raw) -> str:
@@ -461,7 +441,7 @@ def _format_exchange_time(raw) -> str:
 #       "Jun 2026 Results Out" with a padded third period — Mar 2026 and
 #       Jun 2025 carrying the same value, QoQ identical to YoY. A v10 cache for
 #       one holds that fabricated metrics table and must not be re-sent.
-SUMMARY_FORMAT_VERSION = 12
+SUMMARY_FORMAT_VERSION = 11
 
 
 
@@ -748,26 +728,22 @@ def _build_caption(file_path, fallback_caption, company=None,
     above the old template limit so the footer + download link at the end of a
     text message aren't truncated away.
     """
+    started = time.monotonic()
     file_key = os.path.basename(file_path).strip()
     # Only reuse a cached summary that was produced by the CURRENT layout —
     # otherwise a filing summarised before a format change would be re-sent in
     # the old layout forever (this is why results kept arriving as "Stock Bits").
-    cache_started = time.monotonic()
     cached = bot_db.get_filing_summary(file_key, SUMMARY_FORMAT_VERSION)
     if cached:
-        print(f"⚡ [summary-cache] HIT file={file_key} lookup={time.monotonic()-cache_started:.3f}s")
+        _timing("caption cache hit", started, file=file_key)
         return cached, True
 
-    print(f"🧠 [summary] CACHE_MISS file={file_key} company={company!r} filing_type={filing_type!r}")
-    summary_started = time.monotonic()
     ai_summary = generate_pdf_summary(file_path, company, filing_type, download_url)
-    elapsed = time.monotonic() - summary_started
+    _timing("caption build", started, file=file_key, summary_ok=bool(ai_summary))
     if ai_summary:
         trimmed = ai_summary[:3997] + "..." if len(ai_summary) > 4000 else ai_summary
         bot_db.save_filing_summary(file_key, trimmed, SUMMARY_FORMAT_VERSION)
-        print(f"✅ [summary] DONE file={file_key} duration={elapsed:.2f}s chars={len(trimmed)}")
         return trimmed, True
-    print(f"⚠️ [summary] FAILED file={file_key} duration={elapsed:.2f}s")
     # Failure is NOT cached — the caller decides whether to retry on a later
     # poll or accept the degraded caption.
     return fallback_caption, False
@@ -860,16 +836,17 @@ def _full_caption_ex(company, symbol, filing_type, file_path, raw_time,
     use the flag to retry on a later poll instead of delivering the degraded
     caption; see _should_defer_for_summary.
     """
+    started = time.monotonic()
     # Show a branded short link under our own domain instead of the raw NSE URL.
     download_url = _shorten_download_url(download_url)
     fallback = _no_summary_caption(company, symbol, filing_type, download_url)
-    started = time.monotonic()
     body, summary_ok = _build_caption(file_path, fallback, company,
                                       filing_type=filing_type,
                                       download_url=download_url)
-    elapsed = time.monotonic() - started
-    print(f"[timing] caption DONE symbol={symbol} file={os.path.basename(file_path)} duration={elapsed:.2f}s summary_ok={summary_ok}", flush=True)
-    return _caption_with_time(body, company, symbol, raw_time), summary_ok
+    caption = _caption_with_time(body, company, symbol, raw_time)
+    _timing("full caption", started, file=os.path.basename(file_path),
+            summary_ok=summary_ok)
+    return caption, summary_ok
 
 
 def _full_caption(company, symbol, filing_type, file_path, raw_time,
@@ -1543,23 +1520,22 @@ def process_new_filings():
     as ONE summary, not N — so every PDF lands with its summary within ~1 minute
     instead of the later ones queuing for minutes.
     """
-    _cycle_started = time.monotonic()
-    print("[timing] live_cycle START", flush=True)
+    process_started = time.monotonic()
+    fetch_started = time.monotonic()
     filings = fetch_new_filings()
+    _timing("fetch new filings", fetch_started, count=len(filings))
     filings = _dedup_by_filename(filings)
     if not filings:
+        _timing("poll total", process_started, filings=0)
         return
 
-    # Subscriber membership is stable during one polling cycle.
-    # Fetch all symbols with ONE PostgreSQL query.
-    symbols = [(f.get("symbol") or "").upper().strip() for f in filings]
-    subscriber_map = get_subscribers_for_symbols_pg(symbols)
-    if subscriber_map is None:
-        print("⚠️ [timing] Subscriber batch lookup failed; leaving filings for next poll.")
-        return
-    print(f"⏱ [timing] live_batch filings={len(filings)} symbols={len(set(symbols))}")
+    # Reuse subscriber results for duplicate symbols in the SAME poll.
+    # This removes repeated PostgreSQL lookups when several filings for the
+    # same company arrive together, without keeping stale data between polls.
+    subscriber_cache = {}
 
     # ── Phase 1: resolve subscribers / drop undeliverable filings ────────
+    phase1_started = time.monotonic()
     jobs = []
     for filing in filings:
         filing_id   = filing["filing_id"]
@@ -1568,8 +1544,14 @@ def process_new_filings():
         file_path   = filing["file_path"]
         filing_type = filing.get("filing_type") or "New Filing"
 
-        subscribers = subscriber_map.get(symbol, [])
-        print(f"🔎 [timing] subscribers symbol={symbol} count={len(subscribers)}")
+        if symbol in subscriber_cache:
+            subscribers = subscriber_cache[symbol]
+        else:
+            lookup_started = time.monotonic()
+            subscribers = get_subscribers_for_symbol_pg(symbol)
+            subscriber_cache[symbol] = subscribers
+            _timing("subscriber lookup", lookup_started, symbol=symbol,
+                    count=(len(subscribers) if subscribers is not None else "ERROR"))
         if subscribers is None:
             # Lookup FAILED (transient DB error) — do NOT mark notified; leave it
             # is_notified=FALSE so the very next poll retries instead of dropping
@@ -1603,12 +1585,14 @@ def process_new_filings():
             "file_key":     os.path.basename(file_path).strip(),
         })
 
+    _timing("phase 1", phase1_started, jobs=len(jobs),
+            unique_symbols=len(subscriber_cache))
     if not jobs:
+        _timing("poll total", process_started, filings=len(filings), jobs=0)
         return
 
-    print(f"⏱ Phase 1 (DB/subscribers): {time.monotonic() - _cycle_started:.2f}s")
     # ── Phase 2: build all captions concurrently (summary + exchange time) ─
-    _summary_phase_started = time.monotonic()
+    caption_started = time.monotonic()
     futures = {
         j["file_key"]: _caption_pool.submit(
             _full_caption_ex, j["company"], j["symbol"], j["filing_type"],
@@ -1617,26 +1601,41 @@ def process_new_filings():
         for j in jobs
     }
 
-    print(f"⏱ [timing] caption_jobs_submitted count={len(futures)} submit={time.monotonic()-_summary_phase_started:.3f}s")
-    # ── Phase 3: deliver READY captions immediately ──────────────────────
-    # Avoid head-of-line blocking: a slow old PDF must not hold a ready new filing.
-    _delivery_started = time.monotonic()
-    future_to_job = {futures[j["file_key"]]: j for j in jobs}
-    completed = 0
+    _timing("caption submissions", caption_started, jobs=len(jobs))
+    # ── Phase 3: collect completed captions without head-of-line blocking ──
+    # Do NOT call future.result() in filing order. A single slow/timeout summary
+    # must not make every later filing wait behind it. The old ordered waits were
+    # capable of turning two ~25-35s timeouts into a ~50-70s cycle.
+    delivery_phase_started = time.monotonic()
+    caption_results = {}
+    future_to_job = {future: j for j in jobs for future in [futures[j["file_key"]]]}
+
     for future in as_completed(future_to_job):
         j = future_to_job[future]
-        completed += 1
-        ready_at = time.monotonic() - _summary_phase_started
         try:
-            caption, summary_ok = future.result()
+            caption_results[j["file_key"]] = future.result()
         except Exception as e:
             print(f"❌ Caption build failed for {j['file_key']}: {e}")
-            caption = _caption_with_time(
+            caption_results[j["file_key"]] = (
+                _caption_with_time(
+                    f"📄 *{j['company']}* — {j['filing_type']}\n🏦 Symbol: {j['symbol']}",
+                    j["company"], j["symbol"], j["raw_time"],
+                ),
+                False,
+            )
+
+    _timing("caption collection", caption_started, jobs=len(jobs),
+             completed=len(caption_results))
+
+    # Delivery order remains deterministic even though caption generation is not.
+    for j in jobs:
+        caption, summary_ok = caption_results.get(
+            j["file_key"],
+            (_caption_with_time(
                 f"📄 *{j['company']}* — {j['filing_type']}\n🏦 Symbol: {j['symbol']}",
                 j["company"], j["symbol"], j["raw_time"],
-            )
-            summary_ok = False
-        print(f"🚦 [ready] {j['symbol']} file={j['file_key']} completed={completed}/{len(futures)} ready_after={ready_at:.2f}s summary_ok={summary_ok}")
+            ), False),
+        )
 
         # The AI summary failed. Leave the filing is_notified=FALSE and send
         # nothing this round, so the next poll re-summarises it — the LLM
@@ -1698,8 +1697,11 @@ def process_new_filings():
                 bot_db.mark_filing_sent(phone, j["file_key"])
                 continue
             # Only marks sent on confirmed success; queues on failure.
+            send_started = time.monotonic()
             ok = _try_send(phone, j["file_path"], caption, j["file_key"],
                            filing_id=j["filing_id"], template_params=[j["company"]])
+            _timing("WhatsApp send", send_started, symbol=j["symbol"],
+                    phone=phone[-4:], ok=ok)
             if ok and period_key:
                 bot_db.mark_result_period_sent(phone, j["symbol"], period_key)
             if ok:
@@ -1716,12 +1718,9 @@ def process_new_filings():
         if all_sent:
             mark_notified_in_pg(j["filing_id"])
 
-    print(
-        f"🏁 [timing] cycle_complete total={time.monotonic()-_cycle_started:.2f}s "
-        f"filings={len(filings)} jobs={len(jobs)} "
-        f"caption_phase={time.monotonic()-_summary_phase_started:.2f}s "
-        f"delivery_phase={time.monotonic()-_delivery_started:.2f}s"
-    )
+    _timing("delivery phase", delivery_phase_started, jobs=len(jobs))
+    _timing("poll total", process_started,
+            filings=len(filings), jobs=len(jobs))
 
 
 # ── Automatic backfill for subscribers ───────────────────────
@@ -2009,6 +2008,19 @@ def start_watcher():
     # Warm the AI summary engine (one-time LangChain import) so the first real
     # filing isn't slowed by it.
     threading.Thread(target=warm_up_summary_engine, daemon=True, name="summary-warmup").start()
+
+    # Pre-generate summaries in the background so the live path can normally hit
+    # the SQLite cache instead of waiting for the LLM. Import locally to avoid a
+    # circular import (summary_agent imports generate_pdf_summary from this module).
+    if getattr(config, "ENABLE_SUMMARY_AGENT", True):
+        def _start_summary_agent_safe():
+            try:
+                from summary_agent import start_summary_agent
+                start_summary_agent(interval_sec=getattr(config, "SUMMARY_AGENT_INTERVAL_SEC", 60))
+            except Exception as e:
+                print(f"⚠️ Summary agent could not start: {e}")
+        threading.Thread(target=_start_summary_agent_safe, daemon=True, name="summary-agent-start").start()
+
     threading.Thread(target=live_loop, daemon=True, name="live-dispatch").start()
     threading.Thread(target=backfill_loop, daemon=True, name="subscriber-backfill").start()
     if getattr(config, "ENABLE_WINDOW_REMINDER", False):

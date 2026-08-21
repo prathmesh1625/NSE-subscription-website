@@ -59,7 +59,7 @@ BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 
 #
 # REDUCED to 25s for FASTER delivery - we prioritize speed over perfect summaries
 # If summary fails, we retry on next poll (SUMMARY_RETRY_ATTEMPTS) or send basic caption
-SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 22))
+SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 20))
 
 # When the AI summary fails, hold the filing back and re-summarise it on the
 # next poll instead of shipping the degraded "summary isn't available" caption.
@@ -67,16 +67,20 @@ SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 22))
 # REDUCED retry attempts from 3 to 1 for FASTER delivery - we prioritize speed
 # If summary fails once, we send the basic caption rather than waiting for retries
 SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 1))
-SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 45))
+SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 40))
 
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
 # Kept at 4 to avoid LLM/API contention during announcement bursts
-SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 4))
+SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 6))
 
 # LLM used for the AI summary (in-process via output.py / LangChain).
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
 SUMMARY_MODEL    = os.environ.get("SUMMARY_MODEL", "gpt-4o-mini")
+# Background pre-generation keeps summaries warm in SQLite before live delivery.
+ENABLE_SUMMARY_AGENT = os.environ.get("ENABLE_SUMMARY_AGENT", "True").lower() in ("true", "1", "yes")
+SUMMARY_AGENT_INTERVAL_SEC = int(os.environ.get("SUMMARY_AGENT_INTERVAL_SEC", 60))
+
 
 # ── OpenAI cost visibility (Central Dashboard) ───────────────
 # A separate, more powerful "Admin API key" is required to read spend via

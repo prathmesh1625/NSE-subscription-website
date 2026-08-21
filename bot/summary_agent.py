@@ -10,6 +10,7 @@
 import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 import database as bot_db
@@ -28,7 +29,7 @@ def _fetch_all_downloaded_filings():
             FROM {config.FILINGS_TABLE}
             WHERE download_status = 'DOWNLOADED'
             ORDER BY {config.COL_CREATED_AT} DESC
-            LIMIT 500
+            LIMIT 100
         """)
         rows = cur.fetchall()
         cur.close()
@@ -52,29 +53,38 @@ def process_pending_summaries():
     and save it to the filing_summaries SQLite table.
     """
     filings   = _fetch_all_downloaded_filings()
-    generated = 0
-
+    candidates = []
     for filing in filings:
         file_path = filing["file_path"]
-        file_key  = os.path.basename(file_path).strip()
-
-        if not file_key:
+        file_key = os.path.basename(file_path).strip()
+        if not file_key or not os.path.exists(file_path):
             continue
-
         if bot_db.get_filing_summary(file_key):
-            continue  # already cached
-
-        if not os.path.exists(file_path):
             continue
+        candidates.append((file_key, file_path))
 
+    if not candidates:
+        return
+
+    generated = 0
+    workers = max(1, int(getattr(config, "SUMMARY_WORKERS", 6)))
+    print(f"🤖 [SummaryAgent] {len(candidates)} pending summary(s), workers={workers}")
+
+    def build(item):
+        file_key, file_path = item
         print(f"🤖 [SummaryAgent] Generating summary for {file_key}...")
-        summary = generate_pdf_summary(file_path)
-        if summary:
-            bot_db.save_filing_summary(file_key, summary)
-            generated += 1
-            print(f"✅ [SummaryAgent] Cached summary for {file_key}")
-        else:
-            print(f"⚠️  [SummaryAgent] Could not summarise {file_key} — will retry next cycle.")
+        return file_key, generate_pdf_summary(file_path)
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pre-summary") as pool:
+        futures = [pool.submit(build, item) for item in candidates]
+        for future in as_completed(futures):
+            file_key, summary = future.result()
+            if summary:
+                bot_db.save_filing_summary(file_key, summary)
+                generated += 1
+                print(f"✅ [SummaryAgent] Cached summary for {file_key}")
+            else:
+                print(f"⚠️  [SummaryAgent] Could not summarise {file_key} — will retry next cycle.")
 
     if generated:
         print(f"📋 [SummaryAgent] Generated {generated} new summary/summaries this cycle.")

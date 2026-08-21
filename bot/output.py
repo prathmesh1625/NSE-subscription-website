@@ -35,7 +35,7 @@ from functools import lru_cache
 # ── LangChain ────────────────────────────────────────────────────────────────
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 # ── PDF text extraction ───────────────────────────────────────────────────────
 import pdfplumber
@@ -47,33 +47,20 @@ import pdfplumber
 
 class PeriodMetric(BaseModel):
     """A single financial metric for one reporting period."""
-    period_label: str = Field(default="", description="E.g. 'Mar 2026', 'Dec 2025', 'Mar 2025'")
-    value: str = Field(default="", description="Formatted value with currency/unit, e.g. '₹934.17 Cr' or '17.08%'")
-
-    @field_validator("period_label", "value", mode="before")
-    @classmethod
-    def none_to_empty(cls, value):
-        return "" if value is None else str(value)
+    period_label: str = Field(description="E.g. 'Mar 2026', 'Dec 2025', 'Mar 2025'")
+    value: str = Field(description="Formatted value with currency/unit, e.g. '₹934.17 Cr' or '17.08%'")
 
 
 class MetricBlock(BaseModel):
     """Revenue, PAT, OPM or any other key metric."""
-    name: str = Field(default="", description="Full metric name, e.g. 'Revenue', 'Profit After Tax (PAT)'")
-    short_name: str = Field(default="", description="Short label, e.g. 'REV', 'PAT', 'OPM'")
-    periods: list[PeriodMetric] = Field(default_factory=list, description="List of [current_quarter, prev_quarter, same_quarter_last_year]")
-    qoq_change: str = Field(default="", description="QoQ % change, e.g. '+62.18' or '-5.3'")
-    yoy_change: str = Field(default="", description="YoY % change, e.g. '+57.14' or '-10.2'")
-    unit: str = Field(default="", description="'crore' | 'percent' | 'lakh' | 'million' | 'billion' | 'other'")
-
-    @field_validator("name", "short_name", "qoq_change", "yoy_change", "unit", mode="before")
-    @classmethod
-    def none_to_empty(cls, value):
-        return "" if value is None else str(value)
-
-    @field_validator("periods", mode="before")
-    @classmethod
-    def none_to_empty_list(cls, value):
-        return [] if value is None else value
+    name: str = Field(description="Full metric name, e.g. 'Revenue', 'Profit After Tax (PAT)'")
+    short_name: str = Field(description="Short label, e.g. 'REV', 'PAT', 'OPM'")
+    periods: list[PeriodMetric] = Field(
+        description="List of [current_quarter, prev_quarter, same_quarter_last_year]"
+    )
+    qoq_change: str = Field(description="QoQ % change, e.g. '+62.18' or '-5.3'")
+    yoy_change: str = Field(description="YoY % change, e.g. '+57.14' or '-10.2'")
+    unit: str = Field(description="'crore' | 'percent' | 'lakh' | 'million' | 'billion' | 'other'")
 
 
 class FinancialSummary(BaseModel):
@@ -93,20 +80,6 @@ class FinancialSummary(BaseModel):
         default="",
         description="AI insights URL if present, else empty string"
     )
-    insights: str = Field(
-        default="",
-        description="One or two short plain-English investor insights. Bold 1-2 important phrases with single asterisks."
-    )
-
-    @field_validator("company_name", "reporting_period", "basis", "insights_url", "insights", mode="before")
-    @classmethod
-    def none_to_empty(cls, value):
-        return "" if value is None else str(value)
-
-    @field_validator("metrics", mode="before")
-    @classmethod
-    def none_to_empty_metrics(cls, value):
-        return [] if value is None else value
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,14 +123,14 @@ OCR_MAX_PAGES       = int(os.getenv("OCR_MAX_PAGES", "4"))
 # Wall-clock ceiling for ALL OCR of one document. This runs INSIDE
 # config.SUMMARY_TIMEOUT_SEC together with the two LLM calls, so it must leave
 # room for them — see the budget note on SUMMARY_TIMEOUT_SEC in config.py.
-OCR_TIME_BUDGET_SEC = int(os.getenv("OCR_TIME_BUDGET_SEC", "5"))
+OCR_TIME_BUDGET_SEC = int(os.getenv("OCR_TIME_BUDGET_SEC", "8"))
 
 # ── LLM call budget (shared by every provider; kept short to prevent a single filing from monopolising a worker) ───────────────────────────────
 # Retries are exponentially backed off by the provider SDK, so these ride out a
 # short 429 burst rather than failing the filing. Worst case
 # (LLM_TIMEOUT_SEC * (LLM_MAX_RETRIES + 1)) still has to fit inside
 # config.SUMMARY_TIMEOUT_SEC, which hard-caps the whole summary.
-LLM_TIMEOUT_SEC  = int(os.getenv("LLM_TIMEOUT_SEC", "10"))
+LLM_TIMEOUT_SEC  = int(os.getenv("LLM_TIMEOUT_SEC", "15"))
 LLM_MAX_RETRIES  = int(os.getenv("LLM_MAX_RETRIES", "0"))
 
 # A page with less real text than this contributes nothing and is a scan.
@@ -471,10 +444,6 @@ CRITICAL ANTI-HALLUCINATION RULES (read carefully):
 - If a metric is not found, skip it entirely.
 - Use exact numbers from the PDF — do not round or approximate.
 - Return ONLY valid JSON matching the schema. No markdown fences, no explanation.
-
-
-For `insights`, write 1-2 concise investor-focused sentences. Bold only 1-2 genuinely important phrases using WhatsApp single asterisks. If a field is absent, use an empty string or empty list, NEVER null.
-
 """
 
 EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
@@ -498,7 +467,7 @@ EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
 # summarize_content when extraction fails; a retry of a call this size just
 # burns the rest of that budget, so the fallback never got to run and the
 # filing went out with an EMPTY body. Extraction must fail FAST and leave room.
-RESULT_EXTRACT_TIMEOUT_SEC = int(os.getenv("RESULT_EXTRACT_TIMEOUT_SEC", "10"))
+RESULT_EXTRACT_TIMEOUT_SEC = int(os.getenv("RESULT_EXTRACT_TIMEOUT_SEC", "18"))
 
 
 # ── Provider → default model mapping ─────────────────────────────────────────
@@ -539,13 +508,11 @@ def build_chain(provider: str = "google", model: str | None = None):
             model=_model,
             google_api_key=api_key,
             temperature=0,
-            timeout=RESULT_EXTRACT_TIMEOUT_SEC,
-            max_retries=0,
         )
 
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        llm = ChatAnthropic(model=_model, temperature=0, max_tokens=2048, timeout=RESULT_EXTRACT_TIMEOUT_SEC, max_retries=0)
+        llm = ChatAnthropic(model=_model, temperature=0, max_tokens=2048)
 
     elif provider == "openai":
         from langchain_openai import ChatOpenAI
@@ -560,7 +527,7 @@ def build_chain(provider: str = "google", model: str | None = None):
                 "No Groq API key found. "
                 "Add GROQ_API_KEY to your env/system variables."
             )
-        llm = ChatGroq(model=_model, groq_api_key=api_key, temperature=0, max_retries=0, timeout=RESULT_EXTRACT_TIMEOUT_SEC)
+        llm = ChatGroq(model=_model, groq_api_key=api_key, temperature=0, max_retries=2)
 
     else:
         raise ValueError(
@@ -585,7 +552,7 @@ def extract_financials(
     # Limit text size to keep result-day LLM calls bounded.
     # 32k is enough for the financial tables while substantially reducing
     # prompt size/latency versus the old 50k default.
-    max_chars = int(os.getenv("RESULT_MAX_CHARS", "24000")) if provider != "groq" else 18000
+    max_chars = int(os.getenv("RESULT_MAX_CHARS", "32000")) if provider != "groq" else 18000
     input_text = consolidated_first(pdf_text)[:max_chars]
 
     _llm_started = time.monotonic()
@@ -719,7 +686,10 @@ def _build_stock_bits_message(
     if event:
         lines.append(f"⚡ {event}")
         lines.append("")
-    lines.append(f"🤖 {body}{_impact_hashtag(impact)}")
+    # Highlight the actual AI summary body. Keep the impact hashtag outside the
+    # bold span so WhatsApp renders the summary as the primary readable block.
+    highlighted_body = f"*{body.strip()}*" if body and body.strip() else "*Summary unavailable.*"
+    lines.append(f"🤖 {highlighted_body}{_impact_hashtag(impact)}")
     lines.append("")
 
     link_added = False
@@ -794,6 +764,41 @@ def _basis_suffix(basis: str) -> str:
     return ""
 
 
+def _build_results_takeaway(summary: FinancialSummary) -> str:
+    """Build a short deterministic takeaway from extracted metrics.
+
+    This is intentionally not another LLM call: it keeps Result Bits fast and
+    guarantees that the message contains an actual highlighted summary.
+    """
+    if not summary or not summary.metrics:
+        return ""
+
+    # Prefer PAT/profit and revenue when present, otherwise use the first metric.
+    preferred = None
+    for metric in summary.metrics:
+        name = (metric.name or "").lower()
+        if "profit after tax" in name or name == "pat" or "net profit" in name:
+            preferred = metric
+            break
+    if preferred is None:
+        for metric in summary.metrics:
+            if "revenue" in (metric.name or "").lower() or "sales" in (metric.name or "").lower():
+                preferred = metric
+                break
+    if preferred is None:
+        preferred = summary.metrics[0]
+
+    q = (preferred.qoq_change or "").strip()
+    y = (preferred.yoy_change or "").strip()
+    label = preferred.name or preferred.short_name or "Key metric"
+    parts = [label]
+    if q:
+        parts.append(f"{q}% QoQ")
+    if y:
+        parts.append(f"{y}% YoY")
+    return " — ".join([parts[0], ", ".join(parts[1:])]) if len(parts) > 1 else parts[0]
+
+
 def format_whatsapp_message(
     summary: FinancialSummary,
     equisense_url: str = "https://equityalerts.in/portal",
@@ -838,15 +843,15 @@ def format_whatsapp_message(
             f"{_trend_emoji(m.yoy_change)} {_format_change(m.yoy_change)} YoY"
         )
 
+    # Keep a visible, highlighted takeaway even when the structured results
+    # extractor did not return a separate prose insight. This avoids a Result Bits
+    # message looking like it has "no summary" while adding no second LLM call.
+    takeaway = _build_results_takeaway(summary)
     lines.append("")
-    lines.append("🤖 Key Insights:")
-    insight_text = (summary.insights or "").strip()
-    if insight_text:
-        lines.append(f" {insight_text}")
-    else:
-        lines.append(" Financial metrics extracted from the filing.")
-    insight_link = summary.insights_url or download_url or short_url or equisense_url
-    lines.append(f"🔗 {insight_link}")
+    lines.append("🤖 *Key Insights:*" )
+    if takeaway:
+        lines.append(f"*{takeaway}*")
+    lines.append(f"🔗 {summary.insights_url or download_url or short_url or equisense_url}")
     lines.append("")
     lines.append(f"You are receiving this stock update per your request on {equisense_url}")
     lines.append(f"Disclaimer: {equisense_url}/disclaimer")
@@ -919,13 +924,12 @@ def summarize_content(
          "'Board Meeting Intimation', 'Dividend Declaration', 'Order Win'>\n"
          "IMPACT: <one word — High, Medium or Low — how price-sensitive this filing is>\n"
          "SUMMARY: <2-4 sentence plain-English summary: what the company is doing, why it "
-         "matters, and any key dates or amounts. Bold 1-2 genuinely important phrases using "
-         "WhatsApp *single asterisks*. No bullet points or extra headers.>"),
+         "matters, and any key dates or amounts. No bullet points, no headers, no markdown.>"),
         ("human", "Filing title: {filing_type}\n\nFiling content:\n\n{pdf_text}"),
     ])
 
     _summary_started = time.monotonic()
-    summary_input = pdf_text[:5000]
+    summary_input = pdf_text[:6000]
     print(
         f"[timing] content_summary START provider={provider} model={_model} "
         f"input_chars={len(summary_input)} filing_type={filing_type or 'N/A'!r}",
@@ -1849,8 +1853,6 @@ def process_pdf(
         f"filing_type={filing_type or 'N/A'!r}",
         file=sys.stderr,
     )
-    import time as _time
-    _pipeline_started = _time.monotonic()
     print(f"[1/3] Loading PDF: {pdf_source}", file=sys.stderr)
     tmp_path = None
 
@@ -1861,11 +1863,12 @@ def process_pdf(
     else:
         pdf_path = pdf_source
 
+    import time as _time
+    _pipeline_started = _time.monotonic()
     try:
         _extract_started = _time.monotonic()
-        print(f"[timing] pdf_extract START file={os.path.basename(pdf_path)}", file=sys.stderr)
         pdf_text = extract_text_from_pdf_file(pdf_path)
-        print(f"[timing] pdf_extract DONE duration={_time.monotonic() - _extract_started:.2f}s chars={len(pdf_text):,}", file=sys.stderr)
+        print(f"      ⏱ PDF extraction: {_time.monotonic() - _extract_started:.2f}s", file=sys.stderr)
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
