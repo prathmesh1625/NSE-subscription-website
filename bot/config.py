@@ -67,7 +67,7 @@ SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 15))
 # REDUCED retry attempts from 3 to 1 for FASTER delivery - we prioritize speed
 # If summary fails once, we send the basic caption rather than waiting for retries
 SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 0))
-SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 40))
+SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 90))
 
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
