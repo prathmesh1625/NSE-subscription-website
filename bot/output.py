@@ -86,23 +86,81 @@ class FinancialSummary(BaseModel):
 # 2.  PDF text extraction helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _extract_pages_pypdf(pdf_path: str) -> list | None:
-    """Per-page text via pypdf (fast, doesn't stall on vector diagrams), or None."""
+# Production guardrails. Some exchange PDFs contain pathological text layers
+# (e.g. one page producing ~1.9M characters). Extracting the entire page with
+# pypdf was observed to take ~69s. Use PyMuPDF first and cap extraction before
+# the text can monopolise the worker or the LLM.
+MAX_EXTRACT_CHARS = int(os.getenv("MAX_EXTRACT_CHARS", "120000"))
+MAX_PAGE_EXTRACT_CHARS = int(os.getenv("MAX_PAGE_EXTRACT_CHARS", "60000"))
+
+def _extract_pages_fast(pdf_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> list | None:
+    """Fast bounded extraction using PyMuPDF; pypdf remains the fallback."""
+    try:
+        try:
+            import pymupdf
+        except ImportError:
+            import fitz as pymupdf
+
+        pages = []
+        total = 0
+        with pymupdf.open(pdf_path) as doc:
+            for idx, page in enumerate(doc):
+                if total >= max_chars:
+                    print(f"⚡ PDF text cap reached at {total:,} chars; "
+                          "skipping remaining pages.", file=sys.stderr)
+                    break
+                text = page.get_text("text", sort=True) or ""
+                if len(text) > MAX_PAGE_EXTRACT_CHARS:
+                    print(f"⚠️ Page {idx + 1} produced {len(text):,} chars; "
+                          f"capping to {MAX_PAGE_EXTRACT_CHARS:,} chars.", file=sys.stderr)
+                    text = text[:MAX_PAGE_EXTRACT_CHARS]
+                text = text[:max_chars - total]
+                pages.append(text)
+                total += len(text)
+        return pages
+    except Exception as e:
+        print(f"⚠️ PyMuPDF extraction failed: {e}. Falling back to pypdf...",
+              file=sys.stderr)
+        return None
+
+def _extract_pages_pypdf(pdf_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> list | None:
+    """Bounded pypdf fallback extraction."""
     try:
         import pypdf
         reader = pypdf.PdfReader(pdf_path)
-        return [(page.extract_text() or "") for page in reader.pages]
+        pages = []
+        total = 0
+        for idx, page in enumerate(reader.pages):
+            if total >= max_chars:
+                break
+            text = page.extract_text() or ""
+            if len(text) > MAX_PAGE_EXTRACT_CHARS:
+                print(f"⚠️ Page {idx + 1} produced {len(text):,} chars; "
+                      f"capping to {MAX_PAGE_EXTRACT_CHARS:,} chars.", file=sys.stderr)
+                text = text[:MAX_PAGE_EXTRACT_CHARS]
+            text = text[:max_chars - total]
+            pages.append(text)
+            total += len(text)
+        return pages
     except Exception as e:
         print(f"⚠️ pypdf extraction failed: {e}. Falling back to pdfplumber...",
               file=sys.stderr)
         return None
 
 
-def _extract_pages_pdfplumber(pdf_path: str) -> list:
-    """Per-page text via pdfplumber, skipping the slow extract_tables() geometry."""
+def _extract_pages_pdfplumber(pdf_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> list:
+    """Bounded pdfplumber fallback; only used when fast/text extraction fails."""
     print("⏳ Running pdfplumber fallback text extraction...", file=sys.stderr)
+    pages, total = [], 0
     with pdfplumber.open(pdf_path) as pdf:
-        return [(page.extract_text() or "") for page in pdf.pages]
+        for page in pdf.pages:
+            if total >= max_chars:
+                break
+            text = page.extract_text() or ""
+            text = text[:min(MAX_PAGE_EXTRACT_CHARS, max_chars - total)]
+            pages.append(text)
+            total += len(text)
+    return pages
 
 
 # ── OCR fallback for scanned filings and newspaper cuttings ──────────────────
@@ -257,7 +315,7 @@ def _ocr_pages(pdf_path: str, page_indexes: list,
     return out
 
 
-def extract_text_from_pdf_file(pdf_path: str, report: dict | None = None) -> str:
+def extract_text_from_pdf_file(pdf_path: str, report: dict | None = None, max_chars: int = MAX_EXTRACT_CHARS) -> str:
     """
     All text from a PDF: the embedded text layer, with OCR filling in pages that
     have none or whose layer decoded to mojibake.
@@ -265,14 +323,16 @@ def extract_text_from_pdf_file(pdf_path: str, report: dict | None = None) -> str
     Pass `report` to receive extraction diagnostics (page counts, which pages
     were OCR'd and why) without parsing stderr — bot/preview.py uses this.
     """
-    pages = _extract_pages_pypdf(pdf_path)
+    pages = _extract_pages_fast(pdf_path, max_chars=max_chars)
     if pages is None:
-        pages = _extract_pages_pdfplumber(pdf_path)
+        pages = _extract_pages_pypdf(pdf_path, max_chars=max_chars)
+    if pages is None:
+        pages = _extract_pages_pdfplumber(pdf_path, max_chars=max_chars)
     elif len("".join(pages).strip()) <= 100:
         # pypdf found next to nothing — pdfplumber sometimes does better on the
         # same file, so try it before paying for OCR.
         try:
-            plumbed = _extract_pages_pdfplumber(pdf_path)
+            plumbed = _extract_pages_pdfplumber(pdf_path, max_chars=max_chars)
             if len("".join(plumbed).strip()) > len("".join(pages).strip()):
                 pages = plumbed
         except Exception as e:
@@ -686,10 +746,7 @@ def _build_stock_bits_message(
     if event:
         lines.append(f"⚡ {event}")
         lines.append("")
-    # Highlight the actual AI summary body. Keep the impact hashtag outside the
-    # bold span so WhatsApp renders the summary as the primary readable block.
-    highlighted_body = f"*{body.strip()}*" if body and body.strip() else "*Summary unavailable.*"
-    lines.append(f"🤖 {highlighted_body}{_impact_hashtag(impact)}")
+    lines.append(f"🤖 *Summary:* {body}{_impact_hashtag(impact)}")
     lines.append("")
 
     link_added = False
@@ -764,41 +821,6 @@ def _basis_suffix(basis: str) -> str:
     return ""
 
 
-def _build_results_takeaway(summary: FinancialSummary) -> str:
-    """Build a short deterministic takeaway from extracted metrics.
-
-    This is intentionally not another LLM call: it keeps Result Bits fast and
-    guarantees that the message contains an actual highlighted summary.
-    """
-    if not summary or not summary.metrics:
-        return ""
-
-    # Prefer PAT/profit and revenue when present, otherwise use the first metric.
-    preferred = None
-    for metric in summary.metrics:
-        name = (metric.name or "").lower()
-        if "profit after tax" in name or name == "pat" or "net profit" in name:
-            preferred = metric
-            break
-    if preferred is None:
-        for metric in summary.metrics:
-            if "revenue" in (metric.name or "").lower() or "sales" in (metric.name or "").lower():
-                preferred = metric
-                break
-    if preferred is None:
-        preferred = summary.metrics[0]
-
-    q = (preferred.qoq_change or "").strip()
-    y = (preferred.yoy_change or "").strip()
-    label = preferred.name or preferred.short_name or "Key metric"
-    parts = [label]
-    if q:
-        parts.append(f"{q}% QoQ")
-    if y:
-        parts.append(f"{y}% YoY")
-    return " — ".join([parts[0], ", ".join(parts[1:])]) if len(parts) > 1 else parts[0]
-
-
 def format_whatsapp_message(
     summary: FinancialSummary,
     equisense_url: str = "https://equityalerts.in/portal",
@@ -843,15 +865,9 @@ def format_whatsapp_message(
             f"{_trend_emoji(m.yoy_change)} {_format_change(m.yoy_change)} YoY"
         )
 
-    # Keep a visible, highlighted takeaway even when the structured results
-    # extractor did not return a separate prose insight. This avoids a Result Bits
-    # message looking like it has "no summary" while adding no second LLM call.
-    takeaway = _build_results_takeaway(summary)
     lines.append("")
-    lines.append("🤖 *Key Insights:*" )
-    if takeaway:
-        lines.append(f"*{takeaway}*")
-    lines.append(f"🔗 {summary.insights_url or download_url or short_url or equisense_url}")
+    lines.append("🤖 Key Insights:")
+    lines.append(f" {summary.insights_url or download_url or short_url or equisense_url}")
     lines.append("")
     lines.append(f"You are receiving this stock update per your request on {equisense_url}")
     lines.append(f"Disclaimer: {equisense_url}/disclaimer")
@@ -924,12 +940,13 @@ def summarize_content(
          "'Board Meeting Intimation', 'Dividend Declaration', 'Order Win'>\n"
          "IMPACT: <one word — High, Medium or Low — how price-sensitive this filing is>\n"
          "SUMMARY: <2-4 sentence plain-English summary: what the company is doing, why it "
-         "matters, and any key dates or amounts. No bullet points, no headers, no markdown.>"),
+         "matters, and any key dates or amounts. Bold 1-2 genuinely important phrases using "
+         "WhatsApp *single asterisks*. No bullet points or extra headers.>"),
         ("human", "Filing title: {filing_type}\n\nFiling content:\n\n{pdf_text}"),
     ])
 
     _summary_started = time.monotonic()
-    summary_input = pdf_text[:6000]
+    summary_input = pdf_text[:5000]
     print(
         f"[timing] content_summary START provider={provider} model={_model} "
         f"input_chars={len(summary_input)} filing_type={filing_type or 'N/A'!r}",
@@ -1032,6 +1049,20 @@ _NON_RESULTS_TITLE_RE = re.compile(
     r"transcript|audio recording|earnings call|analyst meet|investor meet",
     re.IGNORECASE,
 )
+
+# Titles that are authoritative enough to skip the expensive financial-results
+# detector. AGM/EGM notices can contain hundreds of pages and many monetary
+# figures, which previously made them look like results after a full extraction.
+_HARD_NON_RESULTS_TITLE_RE = re.compile(
+    r"agm|egm|annual general meeting|extraordinary general meeting|"
+    r"postal ballot|shareholder meeting|scrutinizer|trading window|"
+    r"newspaper publication|press release|general updates|investor presentation|"
+    r"analyst.*meet|investor.*meet|conference call",
+    re.IGNORECASE,
+)
+
+def title_is_hard_non_results(filing_type: str) -> bool:
+    return bool(filing_type and _HARD_NON_RESULTS_TITLE_RE.search(filing_type))
 
 
 def looks_like_call_transcript(pdf_text: str, filing_type: str = "") -> bool:
@@ -1867,7 +1898,11 @@ def process_pdf(
     _pipeline_started = _time.monotonic()
     try:
         _extract_started = _time.monotonic()
-        pdf_text = extract_text_from_pdf_file(pdf_path)
+        # Non-results filings only need enough text for the plain summary.
+        # This is especially important for huge AGM/EGM PDFs.
+        extraction_cap = 30000 if title_is_hard_non_results(filing_type) else MAX_EXTRACT_CHARS
+        print(f"      PDF extraction cap: {extraction_cap:,} chars", file=sys.stderr)
+        pdf_text = extract_text_from_pdf_file(pdf_path, max_chars=extraction_cap)
         print(f"      ⏱ PDF extraction: {_time.monotonic() - _extract_started:.2f}s", file=sys.stderr)
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -1889,7 +1924,9 @@ def process_pdf(
     summary     = None
     company     = company_hint or "Unknown Company"
 
-    if looks_like_call_transcript(pdf_text, filing_type):
+    if title_is_hard_non_results(filing_type):
+        print(f"[2/3] Filing title '{filing_type}' is non-results — skipping financial extraction; using content summary.", file=sys.stderr)
+    elif looks_like_call_transcript(pdf_text, filing_type):
         # Checked separately from looks_like_financial_results so the reason is
         # visible in the log, and so the exchange's own filing TITLE counts —
         # looks_like_financial_results only ever sees the text.

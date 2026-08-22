@@ -27,6 +27,12 @@ HEADERS  = {
 # Meta error code returned when the 24-hour customer-service window is closed.
 REENGAGEMENT_ERROR_CODE = 131047
 
+# Set this to True only when config.TEMPLATE_NAME is an APPROVED WhatsApp
+# template with a DOCUMENT header. The previous code always added a document
+# header even though the current config comments describe a text-only template,
+# which can produce Meta error 100 (Invalid parameter).
+TEMPLATE_HAS_DOCUMENT_HEADER = os.getenv("TEMPLATE_HAS_DOCUMENT_HEADER", "true").lower() in ("true", "1", "yes")
+
 
 class WhatsAppError(Exception):
     """Raised when the Meta Cloud API returns a non-2xx response."""
@@ -67,15 +73,9 @@ def _sanitize_template_param(text: str) -> str:
     """
     Flatten a (possibly multi-line) string so Meta accepts it as a template
     body parameter. Collapses all whitespace runs — including newlines and
-    tabs — into single spaces, strips markdown formatting (*bold*, _italic_),
-    and truncates to TEMPLATE_PARAM_MAX_LEN.
-    
-    WhatsApp templates don't support markdown in parameters - Meta rejects them
-    with error code 100 (Invalid parameter).
+    tabs — into single spaces and truncates to TEMPLATE_PARAM_MAX_LEN.
     """
     flattened = re.sub(r"\s+", " ", str(text or "")).strip()
-    # Strip markdown formatting: *bold* and _italic_
-    flattened = re.sub(r"[*_]", "", flattened)
     if len(flattened) > TEMPLATE_PARAM_MAX_LEN:
         flattened = flattened[:TEMPLATE_PARAM_MAX_LEN - 1].rstrip() + "…"
     return flattened or "NSE filing"
@@ -162,44 +162,6 @@ def send_interactive_buttons(to: str, body_text: str, buttons,
         "type": "button",
         "body": {"text": body_text[:1024]},
         "action": {"buttons": reply_buttons},
-    }
-    if header_text:
-        interactive["header"] = {"type": "text", "text": header_text[:60]}
-    if footer_text:
-        interactive["footer"] = {"text": footer_text[:60]}
-
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "interactive",
-        "interactive": interactive,
-    }
-    resp = _post("/messages", payload)
-    return (resp.json().get("messages") or [{}])[0].get("id", "")
-
-
-# ── Send a single call-to-action URL button ───────────────────
-
-def send_cta_url_button(to: str, body_text: str, button_text: str, url: str,
-                        header_text: str = None,
-                        footer_text: str = None) -> str:
-    """
-    Send an interactive message carrying ONE call-to-action URL button. Tapping
-    it opens `url` in the browser (e.g. the manage-companies page). Unlike a
-    reply button this does NOT reopen the 24h window, so it's only used INSIDE
-    the window on the alert itself.
-
-    `body_text` is capped at 1024 chars, `button_text` at 20 (Meta limits).
-    Only valid INSIDE the 24-hour window (raises WhatsAppError 131047 otherwise).
-    Returns the wamid.
-    """
-    interactive = {
-        "type": "cta_url",
-        "body": {"text": body_text[:1024]},
-        "action": {
-            "name": "cta_url",
-            "parameters": {"display_text": button_text[:20], "url": url},
-        },
     }
     if header_text:
         interactive["header"] = {"type": "text", "text": header_text[:60]}
@@ -321,6 +283,14 @@ def _send_pdf_template(to: str, media_id: str, filename: str, body_params,
     """
     count = int(getattr(config, "TEMPLATE_BODY_PARAM_COUNT", 0) or 0)
 
+    if not TEMPLATE_HAS_DOCUMENT_HEADER:
+        raise WhatsAppError(
+            0, None,
+            "Configured WhatsApp template is text-only, but send_pdf_template "
+            "requires an approved DOCUMENT-header template. Set "
+            "TEMPLATE_HAS_DOCUMENT_HEADER=true and use the correct approved template."
+        )
+
     components = [{
         "type": "header",
         "parameters": [{
@@ -389,6 +359,12 @@ def _raise_for_response(response):
         err  = body.get("error", {}) or {}
         error_code = err.get("code")
         error_msg  = err.get("message", error_msg)
+        error_type = err.get("type")
+        error_subcode = err.get("error_subcode")
+        fbtrace_id = err.get("fbtrace_id")
+        if error_type or error_subcode or fbtrace_id:
+            error_msg = (f"{error_msg} | type={error_type} "
+                         f"subcode={error_subcode} fbtrace_id={fbtrace_id}")
     except Exception:
         pass
 

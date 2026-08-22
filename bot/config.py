@@ -49,7 +49,7 @@ POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", 5))    # Live dispat
 # on a long interval, and must NEVER block the live dispatch above. Keeping it
 # off the hot path is what makes new announcements go out within ~1 minute
 # instead of being stuck behind a long backfill sweep.
-BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 min safety-net (live path handles the fast case)
+BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 60))   # 2 min safety-net (live path handles the fast case)
 
 # Max seconds to wait for ONE AI summary. The summary is generated in-process
 # (no per-PDF subprocess cold start) and several at a time; this hard cap means
@@ -59,14 +59,14 @@ BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 
 #
 # REDUCED to 25s for FASTER delivery - we prioritize speed over perfect summaries
 # If summary fails, we retry on next poll (SUMMARY_RETRY_ATTEMPTS) or send basic caption
-SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 20))
+SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 15))
 
 # When the AI summary fails, hold the filing back and re-summarise it on the
 # next poll instead of shipping the degraded "summary isn't available" caption.
 #
 # REDUCED retry attempts from 3 to 1 for FASTER delivery - we prioritize speed
 # If summary fails once, we send the basic caption rather than waiting for retries
-SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 1))
+SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 0))
 SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 40))
 
 # How many AI summaries to generate concurrently. A burst of filings is built in
@@ -79,7 +79,7 @@ SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
 SUMMARY_MODEL    = os.environ.get("SUMMARY_MODEL", "gpt-4o-mini")
 # Background pre-generation keeps summaries warm in SQLite before live delivery.
 ENABLE_SUMMARY_AGENT = os.environ.get("ENABLE_SUMMARY_AGENT", "True").lower() in ("true", "1", "yes")
-SUMMARY_AGENT_INTERVAL_SEC = int(os.environ.get("SUMMARY_AGENT_INTERVAL_SEC", 90))
+SUMMARY_AGENT_INTERVAL_SEC = int(os.environ.get("SUMMARY_AGENT_INTERVAL_SEC", 60))
 # Background pre-generation must not consume the entire live-summary budget.
 SUMMARY_AGENT_WORKERS = int(os.environ.get("SUMMARY_AGENT_WORKERS", 1))
 SUMMARY_AGENT_MAX_CANDIDATES = int(os.environ.get("SUMMARY_AGENT_MAX_CANDIDATES", 20))
