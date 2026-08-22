@@ -342,7 +342,7 @@ def generate_pdf_summary(file_path: str, company: str | None = None,
     box = {}
 
     def _worker():
-        acquired = _summary_llm_gate.acquire(timeout=getattr(config, "SUMMARY_TIMEOUT_SEC", 20))
+        acquired = _summary_llm_gate.acquire(timeout=5)
         if not acquired:
             box["error"] = TimeoutError("summary concurrency gate timeout")
             return
@@ -355,7 +355,7 @@ def generate_pdf_summary(file_path: str, company: str | None = None,
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
-    t.join(getattr(config, "SUMMARY_TIMEOUT_SEC", 35))
+    t.join(getattr(config, "SUMMARY_TIMEOUT_SEC", 50))
 
     if t.is_alive():
         _timing("summary TIMEOUT", started, file=file_name)

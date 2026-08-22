@@ -90,11 +90,11 @@ class FinancialSummary(BaseModel):
 # (e.g. one page producing ~1.9M characters). Extracting the entire page with
 # pypdf was observed to take ~69s. Use PyMuPDF first and cap extraction before
 # the text can monopolise the worker or the LLM.
-MAX_EXTRACT_CHARS = int(os.getenv("MAX_EXTRACT_CHARS", "120000"))
-MAX_PAGE_EXTRACT_CHARS = int(os.getenv("MAX_PAGE_EXTRACT_CHARS", "60000"))
+MAX_EXTRACT_CHARS = int(os.getenv("MAX_EXTRACT_CHARS", "80000"))
+MAX_PAGE_EXTRACT_CHARS = int(os.getenv("MAX_PAGE_EXTRACT_CHARS", "30000"))
 
 def _extract_pages_fast(pdf_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> list | None:
-    """Fast bounded extraction using PyMuPDF; pypdf remains the fallback."""
+    """Fast bounded extraction using PyMuPDF. Never parse the whole PDF with pypdf on the hot path."""
     try:
         try:
             import pymupdf
@@ -119,8 +119,7 @@ def _extract_pages_fast(pdf_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> li
                 total += len(text)
         return pages
     except Exception as e:
-        print(f"⚠️ PyMuPDF extraction failed: {e}. Falling back to pypdf...",
-              file=sys.stderr)
+        print(f"⚠️ PyMuPDF extraction failed: {e}", file=sys.stderr)
         return None
 
 def _extract_pages_pypdf(pdf_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> list | None:
@@ -325,12 +324,21 @@ def extract_text_from_pdf_file(pdf_path: str, report: dict | None = None, max_ch
     """
     pages = _extract_pages_fast(pdf_path, max_chars=max_chars)
     if pages is None:
-        pages = _extract_pages_pypdf(pdf_path, max_chars=max_chars)
-    if pages is None:
-        pages = _extract_pages_pdfplumber(pdf_path, max_chars=max_chars)
-    elif len("".join(pages).strip()) <= 100:
-        # pypdf found next to nothing — pdfplumber sometimes does better on the
-        # same file, so try it before paying for OCR.
+        # IMPORTANT: do not silently fall back to pypdf on the live path.
+        # A pathological one-page PDF was observed to make pypdf spend ~69s
+        # extracting ~1.9M characters before our cap could even run.
+        # pdfplumber is retained only as an explicit emergency opt-in.
+        if os.getenv("ALLOW_SLOW_PDF_FALLBACK", "false").strip().lower() in ("1", "true", "yes"):
+            print("⚠️ Using slow PDF fallback (ALLOW_SLOW_PDF_FALLBACK=true).", file=sys.stderr)
+            pages = _extract_pages_pypdf(pdf_path, max_chars=max_chars)
+            if pages is None:
+                pages = _extract_pages_pdfplumber(pdf_path, max_chars=max_chars)
+        else:
+            raise RuntimeError("PyMuPDF extraction failed; slow pypdf fallback is disabled")
+
+    if len("".join(pages).strip()) <= 100:
+        # Only use pdfplumber when PyMuPDF produced essentially no text.
+        # This avoids paying the fallback cost for normal filings.
         try:
             plumbed = _extract_pages_pdfplumber(pdf_path, max_chars=max_chars)
             if len("".join(plumbed).strip()) > len("".join(pages).strip()):
@@ -338,7 +346,7 @@ def extract_text_from_pdf_file(pdf_path: str, report: dict | None = None, max_ch
         except Exception as e:
             print(f"⚠️ pdfplumber extraction failed: {e}", file=sys.stderr)
     else:
-        print("⚡ Extracted text using fast pypdf parser.", file=sys.stderr)
+        print("⚡ Extracted text using fast PyMuPDF parser.", file=sys.stderr)
 
     usable       = [t for t in pages if page_text_is_usable(t)]
     usable_text  = "\n".join(usable)
@@ -1057,7 +1065,10 @@ _HARD_NON_RESULTS_TITLE_RE = re.compile(
     r"agm|egm|annual general meeting|extraordinary general meeting|"
     r"postal ballot|shareholder meeting|scrutinizer|trading window|"
     r"newspaper publication|press release|general updates|investor presentation|"
-    r"analyst.*meet|investor.*meet|conference call",
+    r"analyst.*meet|investor.*meet|conference call|esg rating|credit rating|"
+    r"rating update|rating reaffirmed|rating revision|shareholding pattern|"
+    r"record date|appointment|resignation|cessation|board meeting intimation|"
+    r"outcome of meeting|disclosure under regulation|",
     re.IGNORECASE,
 )
 
@@ -1900,7 +1911,7 @@ def process_pdf(
         _extract_started = _time.monotonic()
         # Non-results filings only need enough text for the plain summary.
         # This is especially important for huge AGM/EGM PDFs.
-        extraction_cap = 30000 if title_is_hard_non_results(filing_type) else MAX_EXTRACT_CHARS
+        extraction_cap = 25000 if title_is_hard_non_results(filing_type) else MAX_EXTRACT_CHARS
         print(f"      PDF extraction cap: {extraction_cap:,} chars", file=sys.stderr)
         pdf_text = extract_text_from_pdf_file(pdf_path, max_chars=extraction_cap)
         print(f"      ⏱ PDF extraction: {_time.monotonic() - _extract_started:.2f}s", file=sys.stderr)
