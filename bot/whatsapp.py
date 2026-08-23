@@ -193,6 +193,16 @@ def send_text_template(to: str, body_params, template_name: str = None) -> str:
 
     name = template_name or config.TEMPLATE_NAME
     lang = getattr(config, "TEMPLATE_LANG", "en")
+    
+    # Debug: Show exactly what's being sent
+    _safe_print(
+        f"[WA TEMPLATE DEBUG] name={name!r} lang={lang!r} params={len(params)}"
+    )
+    for i, p in enumerate(params, 1):
+        text = p['text']
+        preview = text[:100] + "..." if len(text) > 100 else text
+        _safe_print(f"  Param {i} ({len(text)} chars): {preview}")
+    
     _safe_print(
         f"[WA TEMPLATE] name={name!r} lang={lang!r} "
         f"params={len(params)} lengths={[len(p['text']) for p in params]}"

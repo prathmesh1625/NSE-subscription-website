@@ -116,6 +116,7 @@ def fetch_new_filings():
             FROM {config.FILINGS_TABLE}
             WHERE {config.COL_IS_SENT} = FALSE
               AND download_status = 'DOWNLOADED'
+              AND {config.COL_CREATED_AT} >= NOW() - INTERVAL '6 hours'
             ORDER BY {config.COL_CREATED_AT} ASC
         """
         cur.execute(query)
