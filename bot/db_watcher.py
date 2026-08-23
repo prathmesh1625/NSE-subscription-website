@@ -353,13 +353,26 @@ def generate_pdf_summary(file_path: str, company: str | None = None,
         finally:
             _summary_llm_gate.release()
 
-    t = threading.Thread(target=_worker, daemon=True)
+    configured_timeout = max(10, int(getattr(config, "SUMMARY_TIMEOUT_SEC", 40)))
+    hard_max = max(10, int(getattr(config, "SUMMARY_HARD_MAX_SEC", 45)))
+    effective_timeout = min(configured_timeout, hard_max)
+    print(
+        f"⏱️ [SUMMARY-BUDGET] file={file_name} configured={configured_timeout}s "
+        f"hard_max={hard_max}s effective={effective_timeout}s",
+        flush=True,
+    )
+    t = threading.Thread(target=_worker, daemon=True, name=f"summary-{file_name[:30]}")
     t.start()
-    t.join(getattr(config, "SUMMARY_TIMEOUT_SEC", 50))
+    t.join(effective_timeout)
 
     if t.is_alive():
-        _timing("summary TIMEOUT", started, file=file_name)
-        print(f"⏱️  Summary timed out for {file_name} — sending basic caption.")
+        _timing("summary TIMEOUT", started, file=file_name,
+                 effective_timeout=effective_timeout)
+        print(
+            f"⏱️ [SUMMARY-BUDGET] TIMEOUT after {effective_timeout}s for {file_name}. "
+            "The worker is abandoned; delivery will use the safe fallback if needed.",
+            flush=True,
+        )
         return None
     if "error" in box:
         _timing("summary FAILED", started, file=file_name)
@@ -1079,7 +1092,11 @@ def _document_fingerprint(file_path: str) -> str:
     fingerprint = ""
     try:
         import output
-        pages = output._extract_pages_pypdf(file_path)
+        # Never use pypdf here: this fingerprint runs in the live delivery path
+        # and the old pypdf call was observed taking ~69s on a pathological PDF.
+        # Use the same bounded/killable PyMuPDF extractor as the summary path,
+        # with a much smaller cap because the fingerprint only needs stable text.
+        pages = output._extract_pages_fast(file_path, max_chars=5000)
         if pages:
             flat = _FLATTEN_TITLE.sub("", "".join(pages).lower())
             if len(flat) >= _FINGERPRINT_MIN_CHARS:
@@ -1988,6 +2005,17 @@ def start_watcher():
     filings for up to an hour. Splitting them is the fix.
     """
     ensure_schema()
+    configured_timeout = int(getattr(config, "SUMMARY_TIMEOUT_SEC", 40))
+    hard_max = int(getattr(config, "SUMMARY_HARD_MAX_SEC", 45))
+    print(
+        f"🧠 Summary configuration: configured={configured_timeout}s "
+        f"effective_max={min(configured_timeout, hard_max)}s "
+        f"pdf_extract={getattr(__import__('output'), 'PDF_EXTRACT_TIMEOUT_SEC', 'n/a')}s "
+        f"ocr_budget={getattr(__import__('output'), 'OCR_TIME_BUDGET_SEC', 'n/a')}s "
+        f"ocr_pages={getattr(__import__('output'), 'OCR_MAX_PAGES', 'n/a')} "
+        f"llm_timeout={getattr(__import__('output'), 'LLM_TIMEOUT_SEC', 'n/a')}s",
+        flush=True,
+    )
 
     def live_loop():
         print(f"⚡ Live dispatch started — checking for NEW filings every {config.POLL_INTERVAL_SEC}s")

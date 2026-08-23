@@ -37,6 +37,8 @@ def _fetch_pending_filings():
                 {config.COL_CREATED_AT} AS created_at
             FROM {config.FILINGS_TABLE}
             WHERE download_status = 'DOWNLOADED'
+              AND {config.COL_IS_SENT} = FALSE
+              AND {config.COL_CREATED_AT} >= (CURRENT_TIMESTAMP - INTERVAL '6 hours')
               AND {config.COL_CREATED_AT} <= (CURRENT_TIMESTAMP - (%s * INTERVAL '1 second'))
             ORDER BY {config.COL_CREATED_AT} DESC
             LIMIT %s
