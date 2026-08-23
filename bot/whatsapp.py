@@ -194,14 +194,44 @@ def send_text_template(to: str, body_params, template_name: str = None) -> str:
     name = template_name or config.TEMPLATE_NAME
     lang = getattr(config, "TEMPLATE_LANG", "en")
     
-    # Debug: Show exactly what's being sent
-    _safe_print(
-        f"[WA TEMPLATE DEBUG] name={name!r} lang={lang!r} params={len(params)}"
-    )
+    # Debug: Show exactly what's being sent with FULL content
+    _safe_print("")
+    _safe_print("=" * 80)
+    _safe_print(f"[WA TEMPLATE DEBUG] name={name!r} lang={lang!r} params={len(params)}")
+    _safe_print("=" * 80)
     for i, p in enumerate(params, 1):
         text = p['text']
-        preview = text[:100] + "..." if len(text) > 100 else text
-        _safe_print(f"  Param {i} ({len(text)} chars): {preview}")
+        _safe_print(f"\n📋 Param {i} ({len(text)} chars):")
+        _safe_print("-" * 80)
+        # Show first 200 chars in detail
+        preview = text[:200] if len(text) > 200 else text
+        _safe_print(preview)
+        if len(text) > 200:
+            _safe_print(f"... +{len(text) - 200} more chars")
+        _safe_print("-" * 80)
+        
+        # Check for problematic characters
+        issues = []
+        if '\n' in text:
+            issues.append(f"❌ Contains {text.count(chr(10))} newlines")
+        if '\r' in text:
+            issues.append(f"❌ Contains {text.count(chr(13))} carriage returns")
+        if '\t' in text:
+            issues.append(f"❌ Contains {text.count(chr(9))} tabs")
+        if '    ' in text:
+            issues.append(f"❌ Contains runs of 4+ spaces")
+        if any(ord(c) < 32 and c not in '\n\r\t' for c in text):
+            issues.append(f"❌ Contains control characters")
+        
+        if issues:
+            _safe_print("⚠️  POTENTIAL ISSUES:")
+            for issue in issues:
+                _safe_print(f"   {issue}")
+        else:
+            _safe_print("✅ No obvious formatting issues")
+    
+    _safe_print("=" * 80)
+    _safe_print("")
     
     _safe_print(
         f"[WA TEMPLATE] name={name!r} lang={lang!r} "
@@ -391,11 +421,31 @@ def _send_pdf_template(to: str, media_id: str, filename: str, body_params,
         # so the API call is well-formed (Meta rejects missing params).
         while len(params) < count:
             params.append("NSE filing")
+        
+        # Sanitize and debug parameters
+        sanitized = [_sanitize_template_param(p) for p in params]
+        
+        # Debug: Show PDF template parameters
+        _safe_print("")
+        _safe_print("=" * 80)
+        _safe_print(f"[PDF TEMPLATE DEBUG] template={config.TEMPLATE_NAME!r} params={len(sanitized)}")
+        _safe_print("=" * 80)
+        for i, text in enumerate(sanitized, 1):
+            _safe_print(f"\n📋 Body Param {i} ({len(text)} chars):")
+            _safe_print("-" * 80)
+            preview = text[:200] if len(text) > 200 else text
+            _safe_print(preview)
+            if len(text) > 200:
+                _safe_print(f"... +{len(text) - 200} more chars")
+            _safe_print("-" * 80)
+        _safe_print("=" * 80)
+        _safe_print("")
+        
         components.append({
             "type": "body",
             "parameters": [
-                {"type": "text", "text": _sanitize_template_param(p)}
-                for p in params
+                {"type": "text", "text": text}
+                for text in sanitized
             ],
         })
 
