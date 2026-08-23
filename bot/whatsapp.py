@@ -432,6 +432,8 @@ def _raise_for_response(response):
     """Parse a Meta error response and raise a WhatsAppError."""
     error_code = None
     error_msg  = response.text
+    error_details = {}
+    
     try:
         body = response.json()
         err  = body.get("error", {}) or {}
@@ -440,24 +442,61 @@ def _raise_for_response(response):
         error_type = err.get("type")
         error_subcode = err.get("error_subcode")
         fbtrace_id = err.get("fbtrace_id")
+        
+        error_details = {
+            "code": error_code,
+            "type": error_type,
+            "subcode": error_subcode,
+            "fbtrace_id": fbtrace_id
+        }
+        
         if error_type or error_subcode or fbtrace_id:
             error_msg = (f"{error_msg} | type={error_type} "
                          f"subcode={error_subcode} fbtrace_id={fbtrace_id}")
-    except Exception:
-        pass
+    except Exception as parse_err:
+        _safe_print(f"[ERROR] Failed to parse WhatsApp error response: {parse_err}")
 
+    # Enhanced error messages for common issues
     if error_code == 131026:
         _safe_print(
-            f"[ERROR] WhatsApp API {response.status_code} code=131026: "
-            f"Recipient number is NOT a verified test number. "
-            f"Go to Meta App Dashboard → WhatsApp → API Setup → "
-            f"'To' field and add the number, OR publish your app to Live mode."
+            f"❌ [WhatsApp API Error {response.status_code}] Code 131026: RECIPIENT NOT VERIFIED\n"
+            f"   → Recipient number is NOT a verified test number.\n"
+            f"   → Go to Meta App Dashboard → WhatsApp → API Setup → 'To' field and add the number\n"
+            f"   → OR publish your app to Live mode.\n"
+            f"   → Error details: {error_details}"
+        )
+    elif error_code == 131047:
+        _safe_print(
+            f"⏰ [WhatsApp API Error {response.status_code}] Code 131047: 24-HOUR WINDOW CLOSED\n"
+            f"   → The 24-hour customer service window has closed.\n"
+            f"   → Message will be sent via template fallback."
+        )
+    elif error_code == 100:
+        _safe_print(
+            f"❌ [WhatsApp API Error {response.status_code}] Code 100: INVALID PARAMETER\n"
+            f"   → Check template parameters for unsupported formatting (markdown, newlines).\n"
+            f"   → Error: {error_msg}\n"
+            f"   → Details: {error_details}"
+        )
+    elif error_code == 131053:
+        _safe_print(
+            f"❌ [WhatsApp API Error {response.status_code}] Code 131053: SERVICE UNAVAILABLE\n"
+            f"   → Recipient's WhatsApp service is temporarily unavailable.\n"
+            f"   → Error: {error_msg}"
+        )
+    elif error_code == 130472:
+        _safe_print(
+            f"❌ [WhatsApp API Error {response.status_code}] Code 130472: USER NUMBER INVALID\n"
+            f"   → The phone number is not registered on WhatsApp.\n"
+            f"   → Error: {error_msg}"
         )
     else:
         _safe_print(
-            f"[ERROR] WhatsApp API {response.status_code} "
-            f"(code={error_code}): {error_msg}"
+            f"❌ [WhatsApp API Error {response.status_code}] Code {error_code}: {error_msg}\n"
+            f"   → Details: {error_details}\n"
+            f"   → Full response: {response.text[:500]}"
         )
+    
     raise WhatsAppError(response.status_code, error_code, error_msg, response.text)
 
 

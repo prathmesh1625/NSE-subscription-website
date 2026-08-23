@@ -36,6 +36,7 @@ async function saveAnnouncement(
     if (
         !item.attchmntFile
     ) {
+        console.log(`⚠️  [NSE] ${symbol}: No PDF attachment, skipping`);
         return;
     }
 
@@ -46,6 +47,7 @@ async function saveAnnouncement(
     }
 
     processing.add(item.attchmntFile);
+    const saveStarted = Date.now();
 
     try {
 
@@ -79,11 +81,19 @@ async function saveAnnouncement(
         if (
             !inserted
         ) {
+            // Already exists in database
             return;
         }
 
+        const saveTime = ((Date.now() - saveStarted) / 1000).toFixed(3);
         console.log(
-            `\nNSE Queued: ${symbol}\nTitle: ${item.desc}`
+            `\n🆕 [NSE NEW FILING] ${symbol} - Saved to DB in ${saveTime}s`
+        );
+        console.log(
+            `   📄 Title: ${item.desc}`
+        );
+        console.log(
+            `   📎 PDF: ${filename}`
         );
 
         metrics.increment("downloads");
@@ -93,6 +103,20 @@ async function saveAnnouncement(
             filename
         );
 
+    }
+    catch (err) {
+        console.log(
+            `\n❌ [NSE ERROR] Failed to save ${symbol} announcement`
+        );
+        console.log(
+            `   Title: ${item.desc}`
+        );
+        console.log(
+            `   Error: ${err.message}`
+        );
+        if (err.stack) {
+            console.log(`   Stack: ${err.stack.split('\n').slice(0, 3).join('\n')}`);
+        }
     }
     finally {
 
@@ -109,7 +133,13 @@ async function checkAnnouncements() {
     metrics.increment("cycles");
 
     console.log(
-        "\n=== NSE Cycle ==="
+        "\n" + "=".repeat(70)
+    );
+    console.log(
+        `⏰ NSE CYCLE START - ${new Date().toISOString()}`
+    );
+    console.log(
+        "=".repeat(70)
     );
 
     // Circuit breaker — don't pile on if downloads are badly backed up.
@@ -121,12 +151,19 @@ async function checkAnnouncements() {
     ) {
 
         console.log(
-            `\nCircuit Breaker Active — Pending Jobs: ${pending}`
+            `\n🚨 [Circuit Breaker Active] Pending Jobs: ${pending} (Max: ${config.maxPendingJobs})`
+        );
+        console.log(
+            "   → Skipping this cycle to prevent queue overload"
         );
 
         return;
 
     }
+
+    console.log(
+        `✅ [Circuit Breaker OK] Pending Jobs: ${pending}/${config.maxPendingJobs}`
+    );
 
     const symbols =
         await symbolProvider.getSymbols();
@@ -136,7 +173,7 @@ async function checkAnnouncements() {
     ) {
 
         console.log(
-            "\nNo subscribed companies. Skipping NSE cycle."
+            "\n⚠️  [No Subscriptions] No subscribed companies. Skipping NSE cycle."
         );
 
         return;
@@ -149,7 +186,7 @@ async function checkAnnouncements() {
         );
 
     console.log(
-        `\nNSE monitoring ${subscribedSet.size} subscribed companies via global feed`
+        `\n📊 [NSE Monitoring] Tracking ${subscribedSet.size} subscribed companies via global feed`
     );
 
     // Pull a few pages of the GLOBAL feed (newest first). A handful of pages
@@ -197,8 +234,12 @@ async function checkAnnouncements() {
     metrics.increment("companies", seenSymbols.size);
     metrics.print();
 
+    const cycleTime = ((Date.now() - cycleStarted) / 1000).toFixed(2);
     console.log(
-        `[timing] NSE cycle complete duration=${Date.now() - cycleStarted}ms matched_symbols=${seenSymbols.size}`
+        `\n✅ NSE CYCLE COMPLETE in ${cycleTime}s - Found ${seenSymbols.size} relevant announcements`
+    );
+    console.log(
+        "=".repeat(70) + "\n"
     );
 
 }

@@ -99,6 +99,7 @@ def _dedup_by_filename(rows):
 
 def fetch_new_filings():
     try:
+        query_start = time.time()
         conn = get_pg_conn()
         cur  = conn.cursor()
         query = f"""
@@ -121,17 +122,51 @@ def fetch_new_filings():
         rows = cur.fetchall()
         cur.close()
         conn.close()
+        
+        query_time = time.time() - query_start
+        
+        if rows:
+            print(f"\n{'='*70}")
+            print(f"📊 [DB Query] Fetched {len(rows)} new filing(s) in {query_time:.3f}s")
+            print(f"{'='*70}")
+            # Show filing ages to diagnose delays
+            for row in rows:
+                age = row.get('age_seconds', 0)
+                symbol = row.get('symbol', 'UNKNOWN')
+                filing_type = row.get('filing_type', 'Unknown')
+                if age > 120:  # More than 2 minutes old
+                    print(f"   ⚠️  {symbol}: {age}s old (DELAYED!) - {filing_type}")
+                elif age > 60:  # More than 1 minute old
+                    print(f"   ⏰ {symbol}: {age}s old (Slow) - {filing_type}")
+                else:
+                    print(f"   ✅ {symbol}: {age}s old (Good) - {filing_type}")
+            print(f"{'='*70}\n")
+        else:
+            print(f"[DB Query] No new filings ({query_time:.3f}s)")
 
         resolved = []
         for row in rows:
             row = dict(row)
             rel = row.get("file_path") or ""
-            row["file_path"] = os.path.join(config.SCRAPER_BASE_PATH, rel.strip())
+            full_path = os.path.join(config.SCRAPER_BASE_PATH, rel.strip())
+            
+            # Check if file exists
+            if not os.path.exists(full_path):
+                print(f"❌ [File Missing] {rel} - marked as DOWNLOADED but file not found!")
+                continue
+                
+            row["file_path"] = full_path
             resolved.append(row)
+        
+        if len(resolved) < len(rows):
+            print(f"⚠️  [File Check] {len(rows) - len(resolved)} file(s) missing from disk")
+        
         return resolved
 
     except Exception as e:
-        print(f"❌ PostgreSQL error while fetching filings: {e}")
+        print(f"❌ [PostgreSQL ERROR] Failed to fetch filings: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 

@@ -61,9 +61,12 @@ async function processJobs() {
             await queueRepo.claimJobs(
                 20
             );
-        console.log(
-            `Claimed ${jobs.length} jobs`
-        );
+        
+        if (jobs.length > 0) {
+            console.log(
+                `\n📥 [Download Worker] Claimed ${jobs.length} jobs`
+            );
+        }
 
         if (
             jobs.length === 0
@@ -78,10 +81,11 @@ async function processJobs() {
 
                 );
 
-            console.log(
-                `Idle:
-${delay}ms`
-            );
+            if (delay >= 4000) {
+                console.log(
+                    `💤 [Idle] No jobs, waiting ${delay}ms`
+                );
+            }
 
         }
         else {
@@ -93,20 +97,25 @@ ${delay}ms`
                 try {
                     const t0 = Date.now();
                     await repo.updateStatus(job.url, "DOWNLOADING");
+                    console.log(`⬇️  [Downloading] ${job.filename}...`);
                     await download(job.url, job.filename);
                     await repo.updateStatus(job.url, "DOWNLOADED");
                     await queueRepo.markDone(job.id);
                     await failedRepo.removeByUrl(job.url);
-                    console.log(`Downloaded: ${job.filename} (${Date.now() - t0}ms)`);
+                    const downloadTime = ((Date.now() - t0) / 1000).toFixed(2);
+                    console.log(`✅ [Downloaded] ${job.filename} in ${downloadTime}s`);
                 }
                 catch (err) {
                     await repo.updateStatus(job.url, "FAILED");
                     await queueRepo.markFailed(job.id);
                     await failedRepo.add(job.url, job.filename);
-                    console.log(`Failed: ${job.filename}\n${err.message}`);
+                    console.log(`\n❌ [Download Failed] ${job.filename}`);
+                    console.log(`   Error: ${err.message}`);
+                    console.log(`   URL: ${job.url}`);
                 }
             });
-            console.log(`[timing] download batch jobs=${jobs.length} workers=${Number(config.downloadWorkers) || 6} duration=${Date.now() - batchStarted}ms`);
+            const batchTime = ((Date.now() - batchStarted) / 1000).toFixed(2);
+            console.log(`\n📦 [Batch Complete] ${jobs.length} files in ${batchTime}s (${Number(config.downloadWorkers) || 6} workers)`);
 
         }
 
@@ -114,12 +123,16 @@ ${delay}ms`
     catch (err) {
 
         console.log(
-            "Worker Error:"
+            "\n❌ [Worker Error] Download worker encountered an error:"
         );
 
         console.log(
-            err.message
+            `   ${err.message}`
         );
+        
+        if (err.stack) {
+            console.log(`   Stack: ${err.stack.split('\n').slice(0, 3).join('\n')}`);
+        }
 
     }
     cycles++;
