@@ -621,9 +621,14 @@ def extract_financials(
     input_text = consolidated_first(pdf_text)[:max_chars]
 
     _llm_started = time.monotonic()
+    model_name = model or PROVIDER_DEFAULTS.get(provider)
     print(
-        f"[timing] financial_llm START provider={provider} model={model or PROVIDER_DEFAULTS.get(provider)} "
-        f"input_chars={len(input_text)}",
+        f"\n{'='*80}\n"
+        f"🤖 [OpenAI API CALL] Starting financial extraction...\n"
+        f"   Provider: {provider}\n"
+        f"   Model: {model_name}\n"
+        f"   Input size: {len(input_text):,} characters\n"
+        f"{'='*80}",
         file=sys.stderr,
     )
 
@@ -636,8 +641,27 @@ def extract_financials(
             "schema":   schema_str,
             "pdf_text": input_text,
         })
+        elapsed = time.monotonic() - _llm_started
+        print(
+            f"\n{'='*80}\n"
+            f"✅ [OpenAI API SUCCESS] Financial extraction completed\n"
+            f"   Time taken: {elapsed:.2f}s\n"
+            f"   Provider: {provider}\n"
+            f"   Model: {model_name}\n"
+            f"{'='*80}\n",
+            file=sys.stderr,
+        )
     except Exception as exc:
-        _perf_log("financial_llm FAIL", _llm_started, error=type(exc).__name__)
+        elapsed = time.monotonic() - _llm_started
+        print(
+            f"\n{'='*80}\n"
+            f"❌ [OpenAI API FAILURE] Financial extraction failed\n"
+            f"   Time taken: {elapsed:.2f}s\n"
+            f"   Error: {type(exc).__name__}\n"
+            f"   Details: {str(exc)[:200]}\n"
+            f"{'='*80}\n",
+            file=sys.stderr,
+        )
         raise
     else:
         _perf_log("financial_llm DONE", _llm_started, output_type=type(result).__name__)
