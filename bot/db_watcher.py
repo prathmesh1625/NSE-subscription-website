@@ -353,26 +353,13 @@ def generate_pdf_summary(file_path: str, company: str | None = None,
         finally:
             _summary_llm_gate.release()
 
-    configured_timeout = max(10, int(getattr(config, "SUMMARY_TIMEOUT_SEC", 40)))
-    hard_max = max(10, int(getattr(config, "SUMMARY_HARD_MAX_SEC", 45)))
-    effective_timeout = min(configured_timeout, hard_max)
-    print(
-        f"⏱️ [SUMMARY-BUDGET] file={file_name} configured={configured_timeout}s "
-        f"hard_max={hard_max}s effective={effective_timeout}s",
-        flush=True,
-    )
-    t = threading.Thread(target=_worker, daemon=True, name=f"summary-{file_name[:30]}")
+    t = threading.Thread(target=_worker, daemon=True)
     t.start()
-    t.join(effective_timeout)
+    t.join(getattr(config, "SUMMARY_TIMEOUT_SEC", 50))
 
     if t.is_alive():
-        _timing("summary TIMEOUT", started, file=file_name,
-                 effective_timeout=effective_timeout)
-        print(
-            f"⏱️ [SUMMARY-BUDGET] TIMEOUT after {effective_timeout}s for {file_name}. "
-            "The worker is abandoned; delivery will use the safe fallback if needed.",
-            flush=True,
-        )
+        _timing("summary TIMEOUT", started, file=file_name)
+        print(f"⏱️  Summary timed out for {file_name} — sending basic caption.")
         return None
     if "error" in box:
         _timing("summary FAILED", started, file=file_name)
@@ -902,8 +889,8 @@ def _should_defer_for_summary(filing_id, age_seconds) -> bool:
     must still reach subscribers; the point is only to stop a two-second API
     blip from costing them the summary permanently.
     """
-    max_attempts = getattr(config, "SUMMARY_RETRY_ATTEMPTS", 3)
-    max_age      = getattr(config, "SUMMARY_RETRY_MAX_AGE_SEC", 300)
+    max_attempts = getattr(config, "SUMMARY_RETRY_ATTEMPTS", 1)
+    max_age      = getattr(config, "SUMMARY_RETRY_MAX_AGE_SEC", 75)
 
     # Age wins over the counter: it is the bound that survives a restart.
     if age_seconds is not None and age_seconds >= max_age:
@@ -1092,11 +1079,7 @@ def _document_fingerprint(file_path: str) -> str:
     fingerprint = ""
     try:
         import output
-        # Never use pypdf here: this fingerprint runs in the live delivery path
-        # and the old pypdf call was observed taking ~69s on a pathological PDF.
-        # Use the same bounded/killable PyMuPDF extractor as the summary path,
-        # with a much smaller cap because the fingerprint only needs stable text.
-        pages = output._extract_pages_fast(file_path, max_chars=5000)
+        pages = output._extract_pages_pypdf(file_path)
         if pages:
             flat = _FLATTEN_TITLE.sub("", "".join(pages).lower())
             if len(flat) >= _FINGERPRINT_MIN_CHARS:
@@ -1312,6 +1295,13 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
     # The template body {{1}} carries the AI summary itself, so the user gets
     # summary + PDF in one message. whatsapp.py flattens it for Meta.
     template_params = [caption] if caption else (template_params or [])
+    if not caption.strip():
+        print(f"❌ Refusing WhatsApp delivery for {file_key}: empty caption/summary.")
+        bot_db.queue_pending_filing(
+            phone, file_key, file_path, caption, filing_id=filing_id,
+            error="empty summary/caption"
+        )
+        return False
 
     template_configured = bool(getattr(config, "TEMPLATE_NAME", "") or "")
     window_is_open      = bot_db.window_open(phone)
@@ -1389,6 +1379,25 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
             # PURE resolve_template_send() so preview/testing tooling can
             # compute the identical decision without sending anything.
             decision = resolve_template_send(caption)
+            if not decision.get("template_name"):
+                raise WhatsAppError(0, 100, f"No approved template configured for route={decision.get('route')}")
+            expected = (
+                getattr(config, "TEMPLATE_RESULT_PARAM_COUNT", None)
+                if decision.get("route") in ("result_count", "result_legacy")
+                else getattr(config, "TEMPLATE_BODY_PARAM_COUNT", None)
+            )
+            if expected is not None and len(decision.get("params", [])) != int(expected):
+                raise WhatsAppError(
+                    0, 100,
+                    f"Template parameter mismatch route={decision.get('route')} "
+                    f"name={decision.get('template_name')} expected={expected} "
+                    f"actual={len(decision.get('params', []))}"
+                )
+            print(
+                f"[WA ROUTE] {file_key} route={decision.get('route')} "
+                f"template={decision.get('template_name')} "
+                f"params={len(decision.get('params', []))}"
+            )
             wamid = whatsapp.send_text_template(
                 phone, decision["params"], template_name=decision["template_name"]
             )
@@ -2005,17 +2014,6 @@ def start_watcher():
     filings for up to an hour. Splitting them is the fix.
     """
     ensure_schema()
-    configured_timeout = int(getattr(config, "SUMMARY_TIMEOUT_SEC", 40))
-    hard_max = int(getattr(config, "SUMMARY_HARD_MAX_SEC", 45))
-    print(
-        f"🧠 Summary configuration: configured={configured_timeout}s "
-        f"effective_max={min(configured_timeout, hard_max)}s "
-        f"pdf_extract={getattr(__import__('output'), 'PDF_EXTRACT_TIMEOUT_SEC', 'n/a')}s "
-        f"ocr_budget={getattr(__import__('output'), 'OCR_TIME_BUDGET_SEC', 'n/a')}s "
-        f"ocr_pages={getattr(__import__('output'), 'OCR_MAX_PAGES', 'n/a')} "
-        f"llm_timeout={getattr(__import__('output'), 'LLM_TIMEOUT_SEC', 'n/a')}s",
-        flush=True,
-    )
 
     def live_loop():
         print(f"⚡ Live dispatch started — checking for NEW filings every {config.POLL_INTERVAL_SEC}s")

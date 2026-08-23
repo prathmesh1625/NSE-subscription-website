@@ -90,83 +90,37 @@ class FinancialSummary(BaseModel):
 # (e.g. one page producing ~1.9M characters). Extracting the entire page with
 # pypdf was observed to take ~69s. Use PyMuPDF first and cap extraction before
 # the text can monopolise the worker or the LLM.
-MAX_EXTRACT_CHARS = int(os.getenv("MAX_EXTRACT_CHARS", "50000"))
-MAX_PAGE_EXTRACT_CHARS = int(os.getenv("MAX_PAGE_EXTRACT_CHARS", "20000"))
-# PyMuPDF is fast on normal PDFs, but a malformed/pathological text object can
-# still make page.get_text() spend tens of seconds. Run extraction in a tiny
-# child process so the parent can KILL it when the budget is exceeded.
-PDF_EXTRACT_TIMEOUT_SEC = float(os.getenv("PDF_EXTRACT_TIMEOUT_SEC", "8"))
-
-_FAST_EXTRACT_SCRIPT = r'''import json, sys
-try:
-    import pymupdf
-except Exception:
-    import fitz as pymupdf
-pdf_path = sys.argv[1]
-max_chars = int(sys.argv[2])
-max_page_chars = int(sys.argv[3])
-pages = []
-total = 0
-with pymupdf.open(pdf_path) as doc:
-    for idx, page in enumerate(doc):
-        if total >= max_chars:
-            break
-        text = page.get_text("text", sort=True) or ""
-        if len(text) > max_page_chars:
-            text = text[:max_page_chars]
-        text = text[:max_chars-total]
-        pages.append(text)
-        total += len(text)
-print(json.dumps(pages, ensure_ascii=False))
-'''
-
+MAX_EXTRACT_CHARS = min(max(int(os.getenv("MAX_EXTRACT_CHARS", "60000")), 20000), 60000)
+MAX_PAGE_EXTRACT_CHARS = min(max(int(os.getenv("MAX_PAGE_EXTRACT_CHARS", "20000")), 8000), 20000)
 
 def _extract_pages_fast(pdf_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> list | None:
-    """Bounded, killable PyMuPDF extraction for the live delivery path."""
-    import subprocess
-    started = time.monotonic()
-    print(
-        f"🔎 [PDF-EXTRACT] START file={os.path.basename(pdf_path)} "
-        f"cap={max_chars:,} timeout={PDF_EXTRACT_TIMEOUT_SEC:.1f}s",
-        file=sys.stderr,
-        flush=True,
-    )
+    """Fast bounded extraction using PyMuPDF; pypdf remains the fallback."""
     try:
-        proc = subprocess.run(
-            [sys.executable, "-c", _FAST_EXTRACT_SCRIPT,
-             pdf_path, str(max_chars), str(MAX_PAGE_EXTRACT_CHARS)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=PDF_EXTRACT_TIMEOUT_SEC,
-        )
-        if proc.returncode != 0:
-            err = (proc.stderr or "").strip().replace("\n", " ")[:300]
-            print(
-                f"⚠️ [PDF-EXTRACT] FAILED rc={proc.returncode} "
-                f"error={err or 'unknown'} after {time.monotonic()-started:.2f}s",
-                file=sys.stderr,
-            )
-            return None
-        pages = json.loads(proc.stdout or "[]")
-        print(
-            f"⚡ [PDF-EXTRACT] DONE {time.monotonic()-started:.2f}s "
-            f"pages={len(pages)} chars={sum(len(x) for x in pages):,}",
-            file=sys.stderr,
-            flush=True,
-        )
+        try:
+            import pymupdf
+        except ImportError:
+            import fitz as pymupdf
+
+        pages = []
+        total = 0
+        with pymupdf.open(pdf_path) as doc:
+            for idx, page in enumerate(doc):
+                if total >= max_chars:
+                    print(f"⚡ PDF text cap reached at {total:,} chars; "
+                          "skipping remaining pages.", file=sys.stderr)
+                    break
+                text = page.get_text("text", sort=False) or ""
+                if len(text) > MAX_PAGE_EXTRACT_CHARS:
+                    print(f"⚠️ Page {idx + 1} produced {len(text):,} chars; "
+                          f"capping to {MAX_PAGE_EXTRACT_CHARS:,} chars.", file=sys.stderr)
+                    text = text[:MAX_PAGE_EXTRACT_CHARS]
+                text = text[:max_chars - total]
+                pages.append(text)
+                total += len(text)
         return pages
-    except subprocess.TimeoutExpired:
-        print(
-            f"⏱️ [PDF-EXTRACT] TIMEOUT after {PDF_EXTRACT_TIMEOUT_SEC:.1f}s "
-            f"file={os.path.basename(pdf_path)} — terminating extractor and switching to OCR.",
-            file=sys.stderr,
-            flush=True,
-        )
-        return None
     except Exception as e:
-        print(f"⚠️ [PDF-EXTRACT] ERROR {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"⚠️ PyMuPDF extraction failed: {e}. Falling back to pypdf...",
+              file=sys.stderr)
         return None
 
 def _extract_pages_pypdf(pdf_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> list | None:
@@ -220,22 +174,21 @@ def _extract_pages_pdfplumber(pdf_path: str, max_chars: int = MAX_EXTRACT_CHARS)
 # a results table, so a normal text-layer filing pays nothing for this.
 
 OCR_ENABLED = os.getenv("OCR_ENABLED", "true").strip().lower() not in ("false", "0", "no")
-OCR_DPI     = int(os.getenv("OCR_DPI", "220"))          # 300 is tesseract's sweet spot for print
+OCR_DPI     = min(max(int(os.getenv("OCR_DPI", "250")), 180), 300)          # 300 is tesseract's sweet spot for print
 OCR_LANGS   = os.getenv("OCR_LANGS", "eng")             # e.g. "eng+hin" for Hindi editions
 # Newspaper intimations run 1-4 pages; a fully scanned results statement more.
-OCR_MAX_PAGES       = int(os.getenv("OCR_MAX_PAGES", "4"))
-OCR_PAGE_TIMEOUT_SEC = float(os.getenv("OCR_PAGE_TIMEOUT_SEC", "2.5"))
+OCR_MAX_PAGES       = min(max(int(os.getenv("OCR_MAX_PAGES", "3")), 1), 4)
 # Wall-clock ceiling for ALL OCR of one document. This runs INSIDE
 # config.SUMMARY_TIMEOUT_SEC together with the two LLM calls, so it must leave
 # room for them — see the budget note on SUMMARY_TIMEOUT_SEC in config.py.
-OCR_TIME_BUDGET_SEC = float(os.getenv("OCR_TIME_BUDGET_SEC", "7"))
+OCR_TIME_BUDGET_SEC = min(max(int(os.getenv("OCR_TIME_BUDGET_SEC", "5")), 3), 8)
 
 # ── LLM call budget (shared by every provider; kept short to prevent a single filing from monopolising a worker) ───────────────────────────────
 # Retries are exponentially backed off by the provider SDK, so these ride out a
 # short 429 burst rather than failing the filing. Worst case
 # (LLM_TIMEOUT_SEC * (LLM_MAX_RETRIES + 1)) still has to fit inside
 # config.SUMMARY_TIMEOUT_SEC, which hard-caps the whole summary.
-LLM_TIMEOUT_SEC  = int(os.getenv("LLM_TIMEOUT_SEC", "10"))
+LLM_TIMEOUT_SEC  = min(max(int(os.getenv("LLM_TIMEOUT_SEC", "10")), 8), 12)
 LLM_MAX_RETRIES  = int(os.getenv("LLM_MAX_RETRIES", "0"))
 
 # A page with less real text than this contributes nothing and is a scan.
@@ -282,20 +235,6 @@ def text_looks_garbled(text: str) -> bool:
 def page_text_is_usable(text: str) -> bool:
     """True when a page's extracted text is worth feeding to the model."""
     return len((text or "").strip()) >= _MIN_PAGE_CHARS and not text_looks_garbled(text)
-
-
-def _pdf_page_count(pdf_path: str) -> int:
-    """Get page count without extracting text; used when text extraction times out."""
-    try:
-        try:
-            import pymupdf
-        except ImportError:
-            import fitz as pymupdf
-        with pymupdf.open(pdf_path) as doc:
-            return len(doc)
-    except Exception as e:
-        print(f"⚠️ [PDF-EXTRACT] Could not read page count: {e}", file=sys.stderr)
-        return 0
 
 
 def _ocr_pages(pdf_path: str, page_indexes: list,
@@ -349,9 +288,7 @@ def _ocr_pages(pdf_path: str, page_indexes: list,
                     continue                    # nothing scanned on this page
                 pix = page.get_pixmap(dpi=OCR_DPI)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
-                txt = pytesseract.image_to_string(
-                    img, lang=OCR_LANGS, timeout=OCR_PAGE_TIMEOUT_SEC
-                ) or ""
+                txt = pytesseract.image_to_string(img, lang=OCR_LANGS) or ""
                 if txt.strip():
                     out[idx] = txt
             except pytesseract.TesseractNotFoundError:
@@ -360,7 +297,7 @@ def _ocr_pages(pdf_path: str, page_indexes: list,
                       "tesseract-ocr package in the image.", file=sys.stderr)
                 break
             except Exception as e:
-                print(f"⚠️ [OCR] page={idx + 1} failed: {type(e).__name__}: {e}", file=sys.stderr)
+                print(f"⚠️ OCR failed on page {idx + 1}: {e}", file=sys.stderr)
     except Exception as e:
         print(f"⚠️ OCR could not open {os.path.basename(pdf_path)}: {e}",
               file=sys.stderr)
@@ -379,96 +316,85 @@ def _ocr_pages(pdf_path: str, page_indexes: list,
 
 
 def extract_text_from_pdf_file(pdf_path: str, report: dict | None = None, max_chars: int = MAX_EXTRACT_CHARS) -> str:
-    """Fast PDF extraction with a hard timeout and bounded OCR fallback.
-
-    Important production rule: pdfplumber/pypdf are NOT automatically invoked
-    on the hot path. A malformed PDF can make either parser spend tens of
-    seconds before our character cap is reached. If fast extraction times out,
-    we go directly to OCR and still return enough text for a content summary.
     """
-    extract_started = time.monotonic()
+    All text from a PDF: the embedded text layer, with OCR filling in pages that
+    have none or whose layer decoded to mojibake.
+
+    Pass `report` to receive extraction diagnostics (page counts, which pages
+    were OCR'd and why) without parsing stderr — bot/preview.py uses this.
+    """
     pages = _extract_pages_fast(pdf_path, max_chars=max_chars)
-    extraction_timed_out = pages is None
-
     if pages is None:
-        page_count = _pdf_page_count(pdf_path)
-        page_indexes = list(range(min(page_count, OCR_MAX_PAGES)))
-        print(
-            f"🧭 [PDF-EXTRACT] fast parser unavailable/timed out; "
-            f"page_count={page_count}, OCR candidates={len(page_indexes)}",
-            file=sys.stderr,
-        )
-        pages = [""] * page_count if page_count else []
+        pages = _extract_pages_pypdf(pdf_path, max_chars=max_chars)
+    if pages is None:
+        pages = _extract_pages_pdfplumber(pdf_path, max_chars=max_chars)
+    elif len("".join(pages).strip()) <= 100:
+        # pypdf found next to nothing — pdfplumber sometimes does better on the
+        # same file, so try it before paying for OCR.
+        try:
+            plumbed = _extract_pages_pdfplumber(pdf_path, max_chars=max_chars)
+            if len("".join(plumbed).strip()) > len("".join(pages).strip()):
+                pages = plumbed
+        except Exception as e:
+            print(f"⚠️ pdfplumber extraction failed: {e}", file=sys.stderr)
     else:
-        page_indexes = [i for i, t in enumerate(pages) if not page_text_is_usable(t)]
+        print("⚡ Extracted text using fast PyMuPDF parser.", file=sys.stderr)
 
-    usable = [t for t in pages if page_text_is_usable(t)]
-    usable_text = "\n".join(usable)
+    usable       = [t for t in pages if page_text_is_usable(t)]
+    print(
+        f"[pdf] extraction pages={len(pages)} usable_pages={len(usable)} "
+        f"chars={sum(len(t) for t in pages):,} ocr_enabled={OCR_ENABLED}",
+        file=sys.stderr,
+    )
+    usable_text  = "\n".join(usable)
+    bad_indexes  = [i for i, t in enumerate(pages) if not page_text_is_usable(t)]
     garbled_seen = any(text_looks_garbled(t) for t in pages)
 
     if report is not None:
         report.update({
             "pages": len(pages),
             "usable_pages": len(usable),
-            "garbled_pages": [i + 1 for i, t in enumerate(pages) if text_looks_garbled(t)],
+            "garbled_pages": [i + 1 for i, t in enumerate(pages)
+                              if text_looks_garbled(t)],
             "text_layer_chars": len(usable_text.strip()),
             "ocr_pages": [],
             "ocr_chars": 0,
         })
 
-    needs_ocr = OCR_ENABLED and (
-        extraction_timed_out
-        or not usable
-        or garbled_seen
+    # Only pay for OCR when the text layer can't already do the job: a broken
+    # layer, almost no text at all, or no results table in what we have. A
+    # normal filing whose statement extracted cleanly skips this entirely.
+    needs_ocr = bad_indexes and OCR_ENABLED and (
+        garbled_seen
         or len(usable_text.strip()) < _MIN_USABLE_CHARS
-        or (not looks_like_financial_results(usable_text) and len(usable_text.strip()) < 2500)
+        or not looks_like_financial_results(usable_text)
     )
+    if not needs_ocr:
+        return usable_text if usable else "\n".join(pages)
 
-    if needs_ocr:
-        if not page_indexes:
-            page_indexes = list(range(min(len(pages), OCR_MAX_PAGES)))
-        print(
-            f"🔍 [OCR] START candidates={len(page_indexes[:OCR_MAX_PAGES])} "
-            f"dpi={OCR_DPI} page_timeout={OCR_PAGE_TIMEOUT_SEC}s "
-            f"budget={OCR_TIME_BUDGET_SEC}s",
-            file=sys.stderr,
-            flush=True,
-        )
-        _ocr_started = time.monotonic()
-        ocr_text = _ocr_pages(pdf_path, page_indexes, require_image=bool(usable))
-        print(
-            f"📄 [OCR] END {time.monotonic()-_ocr_started:.2f}s "
-            f"pages={len(ocr_text)} chars={sum(len(v) for v in ocr_text.values()):,}",
-            file=sys.stderr,
-            flush=True,
-        )
-        if report is not None:
-            report["ocr_pages"] = [i + 1 for i in sorted(ocr_text)]
-            report["ocr_chars"] = sum(len(t) for t in ocr_text.values())
+    ocr_text = _ocr_pages(pdf_path, bad_indexes, require_image=bool(usable))
+    if report is not None:
+        report["ocr_pages"] = [i + 1 for i in sorted(ocr_text)]
+        report["ocr_chars"] = sum(len(t) for t in ocr_text.values())
 
-        merged = []
-        for i, t in enumerate(pages):
-            if page_text_is_usable(t):
-                merged.append(t)
-            elif i in ocr_text:
-                merged.append(ocr_text[i])
-        result = "\n".join(merged) if merged else ""
-    else:
-        result = usable_text
+    # Rebuild in page order: OCR replaces an unusable page, a usable text layer
+    # always wins over OCR (it is exact, where OCR guesses glyphs).
+    merged = []
+    for i, t in enumerate(pages):
+        if page_text_is_usable(t):
+            merged.append(t)
+        elif i in ocr_text:
+            merged.append(ocr_text[i])
+    if not merged:
+        # Image-only document and OCR produced nothing. Returning "" (rather
+        # than the mojibake) makes process_pdf raise, so db_watcher sends the
+        # degraded alert that names the filing and links to it — better than a
+        # summary written from garbage.
+        print(f"⚠️ No usable text in {os.path.basename(pdf_path)} "
+              f"({len(pages)} page(s)) and OCR recovered nothing.",
+              file=sys.stderr)
+    return "\n".join(merged)
 
-    elapsed = time.monotonic() - extract_started
-    print(
-        f"📄 [PDF-EXTRACT] END {elapsed:.2f}s chars={len(result):,} "
-        f"text_pages={len(usable)} ocr_pages={len(report.get('ocr_pages', [])) if report else 0}",
-        file=sys.stderr,
-        flush=True,
-    )
-    if not result.strip():
-        print(
-            f"⚠️ [PDF-EXTRACT] No usable text recovered from {os.path.basename(pdf_path)}.",
-            file=sys.stderr,
-        )
-    return result
 
 def download_pdf(url: str) -> str:
     """Download a PDF from URL to a temp file, return local path."""
@@ -606,7 +532,7 @@ EXTRACTION_PROMPT = ChatPromptTemplate.from_messages([
 # summarize_content when extraction fails; a retry of a call this size just
 # burns the rest of that budget, so the fallback never got to run and the
 # filing went out with an EMPTY body. Extraction must fail FAST and leave room.
-RESULT_EXTRACT_TIMEOUT_SEC = int(os.getenv("RESULT_EXTRACT_TIMEOUT_SEC", "14"))
+RESULT_EXTRACT_TIMEOUT_SEC = int(os.getenv("RESULT_EXTRACT_TIMEOUT_SEC", "18"))
 
 
 # ── Provider → default model mapping ─────────────────────────────────────────
@@ -953,40 +879,6 @@ def format_whatsapp_message(
     return "\n".join(lines)
 
 
-def _fallback_content_message(pdf_text: str, company_name: str, filing_type: str = "",
-                              equisense_url: str = "https://equityalerts.in/portal",
-                              download_url: str = "", short_url: str = "") -> str:
-    """Deterministic extractive summary used when the LLM is unavailable.
-
-    This is deliberately NOT an invented AI summary: it only quotes/rephrases
-    the first useful sentences already recovered from the filing. It guarantees
-    the subscriber receives a meaningful Summary section instead of the old
-    "summary isn't available" message.
-    """
-    clean = re.sub(r"\s+", " ", pdf_text or "").strip()
-    clean = re.sub(r"https?://\S+", "", clean).strip()
-    # Prefer a paragraph containing filing/event language, otherwise use the
-    # first readable text. Never invent amounts or dates.
-    sentences = re.split(r"(?<=[.!?])\s+", clean) if clean else []
-    chosen = []
-    for sentence in sentences:
-        sentence = sentence.strip(" -|•")
-        if len(sentence) < 25:
-            continue
-        chosen.append(sentence)
-        if len(" ".join(chosen)) >= 420 or len(chosen) >= 3:
-            break
-    body = " ".join(chosen).strip()
-    if not body:
-        body = (filing_type or "Company filing received from the exchange.").strip()
-    body = body[:700].rstrip()
-    return _build_stock_bits_message(
-        company_name, filing_type or "Exchange filing", body,
-        impact="Low", brand_url=equisense_url, short_url=short_url,
-        download_url=download_url,
-    )
-
-
 def summarize_content(
     pdf_text: str,
     company_name: str,
@@ -1170,10 +1062,7 @@ _HARD_NON_RESULTS_TITLE_RE = re.compile(
     r"agm|egm|annual general meeting|extraordinary general meeting|"
     r"postal ballot|shareholder meeting|scrutinizer|trading window|"
     r"newspaper publication|press release|general updates|investor presentation|"
-    r"analyst.*meet|investor.*meet|conference call|esg rating|credit rating|"
-    r"rating update|rating reaffirmed|rating revision|shareholding pattern|"
-    r"record date|appointment|resignation|cessation|board meeting intimation|"
-    r"outcome of meeting|disclosure under regulation",
+    r"analyst.*meet|investor.*meet|conference call",
     re.IGNORECASE,
 )
 
@@ -2016,7 +1905,7 @@ def process_pdf(
         _extract_started = _time.monotonic()
         # Non-results filings only need enough text for the plain summary.
         # This is especially important for huge AGM/EGM PDFs.
-        extraction_cap = 25000 if title_is_hard_non_results(filing_type) else MAX_EXTRACT_CHARS
+        extraction_cap = 30000 if title_is_hard_non_results(filing_type) else MAX_EXTRACT_CHARS
         print(f"      PDF extraction cap: {extraction_cap:,} chars", file=sys.stderr)
         pdf_text = extract_text_from_pdf_file(pdf_path, max_chars=extraction_cap)
         print(f"      ⏱ PDF extraction: {_time.monotonic() - _extract_started:.2f}s", file=sys.stderr)
@@ -2025,16 +1914,9 @@ def process_pdf(
             os.unlink(tmp_path)
 
     if not pdf_text.strip():
-        print(
-            "⚠️ [SUMMARY-FALLBACK] PDF produced no readable text after "
-            "fast extraction + bounded OCR. Sending deterministic filing summary.",
-            file=sys.stderr,
-            flush=True,
-        )
-        return _fallback_content_message(
-            "", company, filing_type=filing_type,
-            equisense_url=equisense_url, short_url=short_url,
-            download_url=download_url,
+        raise ValueError(
+            "No text extracted from PDF — it may be scanned/image-based. "
+            "Try a text-layer PDF."
         )
     print(
         f"[perf] PDF_TEXT chars={len(pdf_text):,} "
@@ -2183,17 +2065,7 @@ def process_pdf(
             company=company,
             error=type(exc).__name__,
         )
-        print(
-            f"⚠️ [SUMMARY-FALLBACK] LLM content summary failed ({type(exc).__name__}); "
-            "building deterministic extractive summary so delivery still contains Summary.",
-            file=sys.stderr,
-            flush=True,
-        )
-        result_message = _fallback_content_message(
-            pdf_text, company, filing_type=filing_type,
-            equisense_url=equisense_url, short_url=short_url,
-            download_url=download_url,
-        )
+        raise
 
     _perf_log(
         "process_pdf CONTENT_SUMMARY_DONE",

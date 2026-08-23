@@ -49,7 +49,7 @@ POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", 5))    # Live dispat
 # on a long interval, and must NEVER block the live dispatch above. Keeping it
 # off the hot path is what makes new announcements go out within ~1 minute
 # instead of being stuck behind a long backfill sweep.
-BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 60))   # 2 min safety-net (live path handles the fast case)
+BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 120))   # 2 min safety-net (live path handles the fast case)
 
 # Max seconds to wait for ONE AI summary. The summary is generated in-process
 # (no per-PDF subprocess cold start) and several at a time; this hard cap means
@@ -59,31 +59,31 @@ BACKFILL_INTERVAL_SEC = int(os.environ.get("BACKFILL_INTERVAL_SEC", 60))   # 2 m
 #
 # REDUCED to 25s for FASTER delivery - we prioritize speed over perfect summaries
 # If summary fails, we retry on next poll (SUMMARY_RETRY_ATTEMPTS) or send basic caption
-SUMMARY_TIMEOUT_SEC = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 40))
-# Hard safety ceiling: even if Coolify/environment still contains an old
-# SUMMARY_TIMEOUT_SEC=180, one filing can never hold the live dispatcher for
-# more than this many seconds. The effective value is logged at startup.
-SUMMARY_HARD_MAX_SEC = int(os.environ.get("SUMMARY_HARD_MAX_SEC", 45))
+# Production guardrail: a stale env value (for example 180s) must not be able
+# to put a single filing back into the old 3-minute delivery path.
+# 35s gives a normal summary plenty of time while keeping a hard upper bound.
+_summary_timeout_env = int(os.environ.get("SUMMARY_TIMEOUT_SEC", 35))
+SUMMARY_TIMEOUT_SEC = min(max(_summary_timeout_env, 20), 35)
 
 # When the AI summary fails, hold the filing back and re-summarise it on the
 # next poll instead of shipping the degraded "summary isn't available" caption.
 #
 # REDUCED retry attempts from 3 to 1 for FASTER delivery - we prioritize speed
 # If summary fails once, we send the basic caption rather than waiting for retries
-SUMMARY_RETRY_ATTEMPTS    = int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 0))
-SUMMARY_RETRY_MAX_AGE_SEC = int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 90))
+SUMMARY_RETRY_ATTEMPTS    = min(max(int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 1)), 0), 1)
+SUMMARY_RETRY_MAX_AGE_SEC = min(max(int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 75)), 45), 75)
 
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
 # Kept at 4 to avoid LLM/API contention during announcement bursts
-SUMMARY_WORKERS  = int(os.environ.get("SUMMARY_WORKERS", 4))
+SUMMARY_WORKERS  = min(max(int(os.environ.get("SUMMARY_WORKERS", 4)), 2), 6)
 
 # LLM used for the AI summary (in-process via output.py / LangChain).
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
 SUMMARY_MODEL    = os.environ.get("SUMMARY_MODEL", "gpt-4o-mini")
 # Background pre-generation keeps summaries warm in SQLite before live delivery.
 ENABLE_SUMMARY_AGENT = os.environ.get("ENABLE_SUMMARY_AGENT", "True").lower() in ("true", "1", "yes")
-SUMMARY_AGENT_INTERVAL_SEC = int(os.environ.get("SUMMARY_AGENT_INTERVAL_SEC", 60))
+SUMMARY_AGENT_INTERVAL_SEC = int(os.environ.get("SUMMARY_AGENT_INTERVAL_SEC", 90))
 # Background pre-generation must not consume the entire live-summary budget.
 SUMMARY_AGENT_WORKERS = int(os.environ.get("SUMMARY_AGENT_WORKERS", 1))
 SUMMARY_AGENT_MAX_CANDIDATES = int(os.environ.get("SUMMARY_AGENT_MAX_CANDIDATES", 20))
@@ -110,6 +110,8 @@ OPENAI_ADMIN_API_KEY = os.environ.get("OPENAI_ADMIN_API_KEY", "")
 #      newlines out of variables, so a single {{1}} summary becomes a wall of
 #      text). Approved body should be (variables PLAIN — no emoji/branding
 #      before them; the fixed text carries NO branded title):
+#
+#        Stock update for a company in your subscription.
 #
 #        {{1}}
 #
@@ -291,6 +293,7 @@ TEMPLATE_RESULT_NAME_3 = os.environ.get("TEMPLATE_RESULT_NAME_3", "")
 # WhatsApp Manager by hand — Meta has no API to read a template body back.
 TEMPLATE_BODIES = {
     TEMPLATE_NAME: (
+        "Stock update for a company in your subscription.\n\n"
         "{{1}}\n\n{{2}}\n\n{{3}}\n\n{{4}}\n\n"
         "🔗 Download filing:\n{{5}}\n\n"
         "You are receiving this stock update per your request on https://equityalerts.in/portal\n"

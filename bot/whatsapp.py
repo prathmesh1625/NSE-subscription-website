@@ -75,10 +75,67 @@ def _sanitize_template_param(text: str) -> str:
     body parameter. Collapses all whitespace runs — including newlines and
     tabs — into single spaces and truncates to TEMPLATE_PARAM_MAX_LEN.
     """
-    flattened = re.sub(r"\s+", " ", str(text or "")).strip()
+    flattened = re.sub(r"[\x00-\x1f\x7f]", " ", str(text or ""))
+    flattened = re.sub(r"\s+", " ", flattened).strip()
+    # Template variables are data, not WhatsApp markdown. Removing these avoids
+    # Meta treating the variable differently from the approved template text.
+    flattened = re.sub(r"[*_`~]", "", flattened)
+    flattened = re.sub(r"\u200b|\ufeff", "", flattened)
     if len(flattened) > TEMPLATE_PARAM_MAX_LEN:
         flattened = flattened[:TEMPLATE_PARAM_MAX_LEN - 1].rstrip() + "…"
     return flattened or "NSE filing"
+
+
+TEMPLATE_RENDER_MAX_LEN = 1024
+
+
+def _fit_template_params(template_name: str, params: list[str]) -> list[str]:
+    """Fit the rendered template under Meta's ~1024-char body limit.
+
+    The old code capped EVERY variable at 900 chars. With five variables and
+    ~170 chars of fixed footer text, a 900-char AI summary made the rendered
+    message >1024 chars and Meta returned code 100. We now budget against the
+    whole rendered body and preferentially preserve the company/event/link.
+    """
+    cleaned = [_sanitize_template_param(p) for p in params]
+    bodies = getattr(config, "TEMPLATE_BODIES", {}) or {}
+    template_body = bodies.get(template_name or "") or ""
+    fixed_len = len(re.sub(r"\{\{\d+\}\}", "", template_body))
+    variable_budget = max(200, TEMPLATE_RENDER_MAX_LEN - fixed_len)
+
+    total = sum(len(p) for p in cleaned)
+    if total <= variable_budget:
+        return cleaned
+
+    # Stock Bits layout is [title, company, event, summary, link]. Give the
+    # summary the bulk of the remaining budget while protecting the URL.
+    if len(cleaned) == 5:
+        protected = sum(len(cleaned[i]) for i in (0, 1, 2, 4))
+        summary_budget = max(120, variable_budget - protected)
+        cleaned[3] = cleaned[3][:summary_budget].rstrip()
+        # If other variables still make the body too large, trim them gently.
+        total = sum(len(p) for p in cleaned)
+        if total > variable_budget:
+            overflow = total - variable_budget
+            for i in (2, 0, 1):
+                if overflow <= 0:
+                    break
+                take = min(overflow, max(0, len(cleaned[i]) - 20))
+                cleaned[i] = cleaned[i][:-take].rstrip() if take else cleaned[i]
+                overflow -= take
+        return cleaned
+
+    # Results templates have many small variables. Proportionally trim long
+    # values until the complete rendered message fits.
+    overflow = total - variable_budget
+    while overflow > 0:
+        idx = max(range(len(cleaned)), key=lambda i: len(cleaned[i]))
+        if len(cleaned[idx]) <= 20:
+            break
+        take = min(overflow, max(1, len(cleaned[idx]) - 20))
+        cleaned[idx] = cleaned[idx][:-take].rstrip()
+        overflow -= take
+    return cleaned
 
 
 # ── Send plain text ───────────────────────────────────────────
@@ -114,13 +171,32 @@ def send_text_template(to: str, body_params, template_name: str = None) -> str:
     so Meta accepts it (no newlines/tabs/4+ spaces inside a variable).
     Returns the wamid.
     """
+    raw_params = list(body_params or [])
+    expected = getattr(config, "TEMPLATE_BODY_PARAM_COUNT", None)
+    if expected is not None:
+        expected = int(expected)
+        if len(raw_params) != expected:
+            raise WhatsAppError(
+                0, 100,
+                f"Template '{template_name or config.TEMPLATE_NAME}' expects "
+                f"{expected} body parameters but code supplied {len(raw_params)}"
+            )
+
+    fitted_params = _fit_template_params(template_name or config.TEMPLATE_NAME, raw_params)
     params = [
-        {"type": "text", "text": _sanitize_template_param(p)}
-        for p in (body_params or [])
+        {"type": "text", "text": p}
+        for p in fitted_params
     ]
     components = []
     if params:
         components.append({"type": "body", "parameters": params})
+
+    name = template_name or config.TEMPLATE_NAME
+    lang = getattr(config, "TEMPLATE_LANG", "en")
+    _safe_print(
+        f"[WA TEMPLATE] name={name!r} lang={lang!r} "
+        f"params={len(params)} lengths={[len(p['text']) for p in params]}"
+    )
 
     payload = {
         "messaging_product": "whatsapp",
@@ -339,6 +415,8 @@ def _upload_media(file_path: str) -> str:
         )
 
     if response.status_code not in (200, 201):
+        _safe_print(f"[WA ERROR] endpoint={endpoint} status={response.status_code} "
+                    f"payload_keys={list(payload.keys())}")
         _raise_for_response(response)
 
     media_id = response.json().get("id")
