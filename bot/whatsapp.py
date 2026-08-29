@@ -294,6 +294,44 @@ def send_interactive_buttons(to: str, body_text: str, buttons,
     return (resp.json().get("messages") or [{}])[0].get("id", "")
 
 
+# ── Send a single call-to-action URL button ───────────────────
+
+def send_cta_url_button(to: str, body_text: str, button_text: str, url: str,
+                        header_text: str = None,
+                        footer_text: str = None) -> str:
+    """
+    Send an interactive message carrying ONE call-to-action URL button. Tapping
+    it opens `url` in the browser (e.g. the manage-companies page). Unlike a
+    reply button this does NOT reopen the 24h window, so it's only used INSIDE
+    the window on the alert itself.
+
+    `body_text` is capped at 1024 chars, `button_text` at 20 (Meta limits).
+    Only valid INSIDE the 24-hour window (raises WhatsAppError 131047 otherwise).
+    Returns the wamid.
+    """
+    interactive = {
+        "type": "cta_url",
+        "body": {"text": body_text[:1024]},
+        "action": {
+            "name": "cta_url",
+            "parameters": {"display_text": button_text[:20], "url": url},
+        },
+    }
+    if header_text:
+        interactive["header"] = {"type": "text", "text": header_text[:60]}
+    if footer_text:
+        interactive["footer"] = {"text": footer_text[:60]}
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": interactive,
+    }
+    resp = _post("/messages", payload)
+    return (resp.json().get("messages") or [{}])[0].get("id", "")
+
+
 # ── Send PDF document ─────────────────────────────────────────
 
 def send_pdf(to: str, file_path: str, caption: str = "",
