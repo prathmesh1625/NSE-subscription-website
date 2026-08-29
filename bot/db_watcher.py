@@ -1349,26 +1349,36 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
     # through to the approved template + document path below, exactly as before,
     # so silent subscribers keep receiving their filings as template+PDF.
     if getattr(config, "SEND_AS_TEXT", True) and window_is_open and not force_template:
+        # The send itself is isolated from the bookkeeping that follows it, so
+        # that only a genuine SEND failure falls through to the template path
+        # below — a database hiccup after delivery must never re-send.
+        wamid = None
+        sent  = False
         try:
             # Attach a "Manage companies" CTA button that opens the add/remove
             # page. A cta_url body is capped at 1024 chars, so very long alerts
             # (large metrics tables) fall back to a plain text send.
             manage_url = getattr(config, "MANAGE_COMPANIES_URL", "")
             if manage_url and len(caption) <= 1024:
-                wamid = whatsapp.send_cta_url_button(
-                    phone, caption,
-                    button_text="Manage companies",
-                    url=manage_url,
-                )
+                try:
+                    wamid = whatsapp.send_cta_url_button(
+                        phone, caption,
+                        button_text="Manage companies",
+                        url=manage_url,
+                    )
+                except Exception as e:
+                    # The button is a nicety; the alert is not. Anything wrong
+                    # with the CTA path — a payload Meta rejects, or the helper
+                    # missing from a half-deployed whatsapp.py — degrades to a
+                    # plain text send rather than costing the user the message.
+                    if isinstance(e, WhatsAppError) and e.is_reengagement:
+                        raise
+                    print(f"⚠️  CTA button failed for {phone} ({file_key}): {e} "
+                          f"— sending plain text instead.")
+                    wamid = whatsapp.send_text(phone, caption)
             else:
                 wamid = whatsapp.send_text(phone, caption)
-            bot_db.mark_filing_sent(phone, file_key)
-            bot_db.remove_pending_filing(phone, file_key)
-            if wamid:
-                bot_db.store_wamid(wamid, phone, file_key, file_path, caption,
-                                   filing_id=filing_id, channel="text")
-            whatsapp._safe_print(f"[OK] Sent text alert to {phone} for {file_key}")
-            return True
+            sent = True
         except WhatsAppError as e:
             if e.is_reengagement:
                 # Our window read was stale — the window is actually closed.
@@ -1376,19 +1386,27 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
                 print(f"⏳ Window actually closed for {phone} — using template "
                       f"(document) for {file_key}.")
             else:
-                print(f"❌ Text send failed for {phone} ({file_key}): {e}")
-                bot_db.queue_pending_filing(
-                    phone, file_key, file_path, caption, filing_id=filing_id,
-                    error=f"text send failed: {e}"
-                )
-                return False
+                # An open window must never leave a user worse off than a
+                # silent one. Fall through to the template rather than queueing
+                # the filing and delivering nothing at all.
+                print(f"❌ Text send failed for {phone} ({file_key}): {e} "
+                      f"— falling back to template.")
         except Exception as e:
-            print(f"❌ Unexpected text send error for {phone} ({file_key}): {e}")
-            bot_db.queue_pending_filing(
-                phone, file_key, file_path, caption, filing_id=filing_id,
-                error=f"text send error: {e}"
-            )
-            return False
+            print(f"❌ Unexpected text send error for {phone} ({file_key}): {e} "
+                  f"— falling back to template.")
+
+        if sent:
+            try:
+                bot_db.mark_filing_sent(phone, file_key)
+                bot_db.remove_pending_filing(phone, file_key)
+                if wamid:
+                    bot_db.store_wamid(wamid, phone, file_key, file_path, caption,
+                                       filing_id=filing_id, channel="text")
+            except Exception as e:
+                print(f"⚠️  Post-send bookkeeping failed for {phone} "
+                      f"({file_key}): {e}")
+            whatsapp._safe_print(f"[OK] Sent text alert to {phone} for {file_key}")
+            return True
 
     # ── Closed window → TEXT-ONLY template (no attachment) ───────────────────
     # The approved template is body-only (no media header):
