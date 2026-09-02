@@ -186,6 +186,7 @@ export function Disclamer() {
                         <div className="section" id="not-advice">
                             <span className="section-tag">01</span>
                             <h2>Not Investment Advice</h2>
+                            <p><strong style={{ color: "var(--ink)" }}>EquityAlerts is a product of EagleSwift Global Advisors Private Limited</strong>, a company incorporated in India. References to "we", "our", or "us" in this Disclaimer mean EagleSwift Global Advisors Private Limited.</p>
                             <p>EquityAlerts aggregates publicly available regulatory filings from the Bombay Stock Exchange (BSE) and National Stock Exchange (NSE) and delivers them to users via a web platform and WhatsApp notifications. This service is purely informational.</p>
                             <div className="summary-row">
                                 <div className="s-box safe">
@@ -301,7 +302,7 @@ export function Disclamer() {
                                 </div>
                                 <div>
                                     <p>Email us at <a href="mailto:support@equityalerts.ai">support@equityalerts.ai</a></p>
-                                    <p style={{ fontSize: "12px", marginTop: "2px" }}>EquityAlerts · Mumbai, Maharashtra, India</p>
+                                    <p style={{ fontSize: "12px", marginTop: "2px" }}>EquityAlerts, a product of EagleSwift Global Advisors Private Limited · Mumbai, Maharashtra, India</p>
                                 </div>
                             </div>
                         </div>
@@ -311,7 +312,8 @@ export function Disclamer() {
             </div>
 
             <footer>
-                <p>© 2025 EquityAlerts. All rights reserved.</p>
+                <p>© 2025 EagleSwift Global Advisors Private Limited. All rights reserved.</p>
+                <p>EquityAlerts is a product of EagleSwift Global Advisors Private Limited.</p>
                 <p>
                     <Link to="/privacy-policy">Privacy Policy</Link> &nbsp;·&nbsp;
                     <Link to="/terms-of-service">Terms of Service</Link> &nbsp;·&nbsp;

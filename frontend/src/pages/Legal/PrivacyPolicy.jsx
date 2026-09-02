@@ -319,7 +319,8 @@ export function PrivacyPolicy() {
                     <main className="doc-body">
 
                         <div className="section">
-                            <p>EquityAlerts ("we", "our", or "us") operates a platform that lets you monitor listed company announcements from NSE and BSE, build a watchlist, and receive real-time notifications via WhatsApp. This Privacy Policy explains what personal data we collect, how we use it, who we share it with, and what rights you have under the <strong style={{ color: "var(--ink)" }}>Digital Personal Data Protection Act, 2023</strong> (DPDP Act).</p>
+                            <p><strong style={{ color: "var(--ink)" }}>EquityAlerts is a product of EagleSwift Global Advisors Private Limited</strong>, a company incorporated in India. EagleSwift Global Advisors Private Limited is the data fiduciary responsible for the personal data described in this policy.</p>
+                            <p>EquityAlerts ("we", "our", or "us" — meaning EagleSwift Global Advisors Private Limited) operates a platform that lets you monitor listed company announcements from NSE and BSE, build a watchlist, and receive real-time notifications via WhatsApp. This Privacy Policy explains what personal data we collect, how we use it, who we share it with, and what rights you have under the <strong style={{ color: "var(--ink)" }}>Digital Personal Data Protection Act, 2023</strong> (DPDP Act).</p>
                             <p>By using EquityAlerts, you agree to the practices described in this policy.</p>
                         </div>
 
@@ -530,7 +531,7 @@ export function PrivacyPolicy() {
                                 </div>
                                 <div>
                                     <p>Email us at <a href="mailto:support@equityalerts.ai">support@equityalerts.ai</a></p>
-                                    <p style={{ fontSize: "12px", marginTop: "2px" }}>EquityAlerts · Mumbai, Maharashtra, India</p>
+                                    <p style={{ fontSize: "12px", marginTop: "2px" }}>EquityAlerts, a product of EagleSwift Global Advisors Private Limited · Mumbai, Maharashtra, India</p>
                                 </div>
                             </div>
                         </div>
@@ -540,7 +541,8 @@ export function PrivacyPolicy() {
             </div>
 
             <footer>
-                <p>© 2025 EquityAlerts. All rights reserved.</p>
+                <p>© 2025 EagleSwift Global Advisors Private Limited. All rights reserved.</p>
+                <p>EquityAlerts is a product of EagleSwift Global Advisors Private Limited.</p>
                 <p>
                     <Link to="/terms-of-service">Terms of Service</Link>
                     &nbsp;·&nbsp;

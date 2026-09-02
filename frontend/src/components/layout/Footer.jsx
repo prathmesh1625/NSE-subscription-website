@@ -36,6 +36,19 @@ export default function Footer() {
                             Company announcement monitoring for NSE & BSE.
                             Informational alerts only — not investment advice.
                         </p>
+
+                        {/* Ownership disclosure — EquityAlerts is the product
+                            name; the legal entity behind it is EagleSwift
+                            Global Advisors Private Limited. Stated here (and on
+                            every legal page) so the relationship is verifiable
+                            by users and by platform reviewers. */}
+                        <p className="text-[#98A0AE] text-sm mt-4 leading-6">
+                            EquityAlerts is a product of{" "}
+                            <span className="font-semibold text-[#C7CDD8]">
+                                EagleSwift Global Advisors Private Limited
+                            </span>
+                            .
+                        </p>
                     </div>
                     
                     {/* Support */}
@@ -95,8 +108,10 @@ export default function Footer() {
                 {/* Bottom Footer */}
                 <div className="border-t border-[#1E2535] pt-6 flex flex-col md:flex-row justify-between items-center gap-4">
 
-                    <p className="text-[#646E7E] text-sm">
-                        © {new Date().getFullYear()} EquityAlerts. All rights reserved.
+                    <p className="text-[#646E7E] text-sm text-center md:text-left">
+                        © {new Date().getFullYear()} EagleSwift Global Advisors
+                        Private Limited. All rights reserved. EquityAlerts is a
+                        product of EagleSwift Global Advisors Private Limited.
                     </p>
 
                     <div className="flex flex-wrap justify-center items-center gap-x-4 gap-y-2 text-[#9298A0]">

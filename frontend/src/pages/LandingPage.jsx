@@ -320,6 +320,14 @@ function LandingPage() {
                             <p className="text-[#646E7E] text-[12.5px] leading-[1.7] mt-3.5 max-w-[260px]">
                                 Company announcement monitoring for NSE &amp; BSE. Informational alerts only — not investment advice.
                             </p>
+                            {/* Ownership disclosure — EquityAlerts is the product name;
+                                the legal entity behind it is EagleSwift Global Advisors
+                                Private Limited. Stated here and on every legal page so
+                                the relationship is verifiable by users and reviewers. */}
+                            <p className="text-[#98A0AE] text-[12.5px] leading-[1.7] mt-3.5 max-w-[260px]">
+                                EquityAlerts is a product of{" "}
+                                <span className="font-semibold text-[#C7CDD8]">EagleSwift Global Advisors Private Limited</span>.
+                            </p>
                         </div>
                         
                     
@@ -336,7 +344,7 @@ function LandingPage() {
                         </div>
                     </div>
                     <div className="border-t border-[#1E2535] pt-[26px] flex justify-between items-center gap-4 flex-wrap text-[11.5px] text-[#646E7E]">
-                        <span>© 2026 EquityAlerts. All rights reserved.</span>
+                        <span>© 2026 EagleSwift Global Advisors Private Limited. All rights reserved. EquityAlerts is a product of EagleSwift Global Advisors Private Limited.</span>
                         <div className="flex gap-5">
                             <Link to="/privacy-policy" className="hover:text-[#33D097] transition-colors">Privacy Policy</Link>
                             <Link to="/terms-of-service" className="hover:text-[#33D097] transition-colors">Terms of Service</Link>

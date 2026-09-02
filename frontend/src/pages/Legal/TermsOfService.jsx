@@ -203,7 +203,8 @@ export function TermsOfService() {
 
                         <div className="section">
                             <p>These Terms of Service ("Terms") govern your access to and use of EquityAlerts, a platform that aggregates BSE and NSE company filings, allows you to build a personal watchlist, and delivers real-time announcements to you via WhatsApp.</p>
-                            <p>These Terms constitute a legally binding agreement between you and EquityAlerts. If you do not agree, please do not use our platform.</p>
+                            <p><strong style={{ color: "var(--ink)" }}>EquityAlerts is a product of EagleSwift Global Advisors Private Limited</strong>, a company incorporated in India. "EquityAlerts" is the product name under which EagleSwift Global Advisors Private Limited operates this platform and its WhatsApp alerts service.</p>
+                            <p>These Terms constitute a legally binding agreement between you and EagleSwift Global Advisors Private Limited (operating as EquityAlerts). If you do not agree, please do not use our platform.</p>
                             <div className="summary-grid">
                                 <div className="summary-card">
                                     <span className="s-icon">📋</span>
@@ -226,6 +227,7 @@ export function TermsOfService() {
                         <div className="section" id="about">
                             <span className="section-tag">01</span>
                             <h2>About EquityAlerts</h2>
+                            <p>EquityAlerts is a product of <strong style={{ color: "var(--ink)" }}>EagleSwift Global Advisors Private Limited</strong>. All references to "we", "our", or "us" in these Terms mean EagleSwift Global Advisors Private Limited.</p>
                             <p>EquityAlerts is an information aggregation platform. We source publicly available exchange filings from the Bombay Stock Exchange (BSE) and National Stock Exchange (NSE) and present them in a structured, searchable format. Users can add companies to a watchlist and opt in to receive WhatsApp notifications when those companies make new filings or announcements.</p>
                             <p><strong style={{ color: "var(--ink)" }}>EquityAlerts is not a stockbroker, investment advisor, or portfolio manager.</strong> We are not registered with SEBI as an investment advisor. Nothing on this platform constitutes investment, financial, or legal advice.</p>
                         </div>
@@ -381,7 +383,7 @@ export function TermsOfService() {
                                 </div>
                                 <div>
                                     <p>Email us at <a href="mailto:support@equityalerts.ai">support@equityalerts.ai</a></p>
-                                    <p style={{ fontSize: "12px", marginTop: "2px" }}>EquityAlerts · Mumbai, Maharashtra, India</p>
+                                    <p style={{ fontSize: "12px", marginTop: "2px" }}>EquityAlerts, a product of EagleSwift Global Advisors Private Limited · Mumbai, Maharashtra, India</p>
                                 </div>
                             </div>
                         </div>
@@ -391,7 +393,8 @@ export function TermsOfService() {
             </div>
 
             <footer>
-                <p>© 2025 EquityAlerts. All rights reserved.</p>
+                <p>© 2025 EagleSwift Global Advisors Private Limited. All rights reserved.</p>
+                <p>EquityAlerts is a product of EagleSwift Global Advisors Private Limited.</p>
                 <p>
                     <Link to="/privacy-policy">Privacy Policy</Link>
                     &nbsp;·&nbsp;
