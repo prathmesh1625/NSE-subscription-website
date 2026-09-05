@@ -877,12 +877,49 @@ async function searchCompanies(search, selectedIds = []) {
 // every filing PDF it has picked up, without needing DB access.
 // ---------------------------------------------------------------------------
 
+// The dashboard's directory pages through this endpoint until it has every
+// scraped company (see central-frontend's listAllCompanies), so one page
+// load fires several of these requests back-to-back, and an admin reopening
+// the panel fires the same batch again seconds later. A short TTL cache
+// collapses all of that into one real aggregation, independent of whether
+// the announcements table has its indexes yet — and keeps paying off as the
+// scraper accumulates more filings and this query gets more expensive.
+// "Scraped companies" is a browsing aid, not a live feed, so ~20s of
+// staleness on a newly-scraped filing is an acceptable trade for that.
+const SCRAPED_COMPANIES_CACHE_TTL_MS = 20000;
+const scrapedCompaniesCache = new Map();
+
 /**
  * One row per company the scraper has ever filed an announcement for, with
  * a filing count and the most recent filing time. `search` matches the NSE/
  * BSE symbol (e.g. "TATAPOWER").
  */
 async function listScrapedCompanies(search, page, pageSize) {
+    const cacheKey = `${search || ""} ${page} ${pageSize}`;
+    const cached = scrapedCompaniesCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.value;
+    }
+
+    const value = await queryScrapedCompanies(search, page, pageSize);
+    scrapedCompaniesCache.set(cacheKey, { value, expiresAt: Date.now() + SCRAPED_COMPANIES_CACHE_TTL_MS });
+
+    // Cache key includes free-text search input, so distinct keys are
+    // unbounded over a long-running process. Sweep expired entries whenever
+    // the map gets big rather than adding a timer — this path already runs
+    // often enough (every companies-panel load) to keep it bounded in
+    // practice, without a separate thing to manage the lifecycle of.
+    if (scrapedCompaniesCache.size > 500) {
+        const now = Date.now();
+        for (const [key, entry] of scrapedCompaniesCache) {
+            if (entry.expiresAt <= now) scrapedCompaniesCache.delete(key);
+        }
+    }
+
+    return value;
+}
+
+async function queryScrapedCompanies(search, page, pageSize) {
     const offset = (page - 1) * pageSize;
     const like = `%${search || ""}%`;
 
