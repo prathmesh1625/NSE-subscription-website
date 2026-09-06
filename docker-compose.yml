@@ -118,7 +118,11 @@ services:
       # companies that currently have >=1 active subscription (via
       # symbolProvider -> subscribedCompanyRepository, refreshed every ~20s).
       # No static SYMBOLS list is used at runtime, so none is set here.
-      - INTERVAL=${POLL_INTERVAL_MS:-20000}
+      - INTERVAL=${NSE_POLL_INTERVAL_MS:-${POLL_INTERVAL_MS:-20000}}
+      - NSE_POLL_INTERVAL_MS=${NSE_POLL_INTERVAL_MS:-20000}
+      - NSE_GLOBAL_PAGES=${NSE_PAGES:-${NSE_GLOBAL_PAGES:-1}}
+      - NSE_PAGES=${NSE_PAGES:-1}
+      - NSE_REQUEST_TIMEOUT_MS=${NSE_REQUEST_TIMEOUT_MS:-6000}
       - MAX_RECORDS=${MAX_RECORDS:-10}
       - REQUEST_LIMIT=${REQUEST_LIMIT:-5}
       - DOWNLOAD_WORKERS=${DOWNLOAD_WORKERS:-10}
@@ -156,8 +160,11 @@ services:
       - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in the environment}
       # Like the NSE scraper, fully subscription-driven — it only scrapes
       # companies that currently have >=1 active subscription.
-      - BSE_INTERVAL=${BSE_POLL_INTERVAL_MS:-8000}
-      - BSE_MAX_PAGES=${BSE_MAX_PAGES:-6}
+      - BSE_INTERVAL=${BSE_POLL_INTERVAL_MS:-${BSE_INTERVAL:-20000}}
+      - BSE_POLL_INTERVAL_MS=${BSE_POLL_INTERVAL_MS:-20000}
+      - BSE_MAX_PAGES=${BSE_PAGES:-${BSE_MAX_PAGES:-1}}
+      - BSE_PAGES=${BSE_PAGES:-1}
+      - BSE_REQUEST_TIMEOUT_MS=${BSE_REQUEST_TIMEOUT_MS:-6000}
       - BSE_REQUEST_LIMIT=${BSE_REQUEST_LIMIT:-4}
       - BSE_DOWNLOAD_CONCURRENCY=${BSE_DOWNLOAD_CONCURRENCY:-8}
       - BSE_DOWNLOAD_BATCH=${BSE_DOWNLOAD_BATCH:-20}

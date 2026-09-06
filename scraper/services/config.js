@@ -19,20 +19,23 @@ module.exports = {
     interval:
 
         Number(
+            process.env.NSE_POLL_INTERVAL_MS
+            ||
             process.env.INTERVAL
             ||
-            10000
+            20000
         ),
 
     // How many pages of NSE's GLOBAL announcements feed to pull each cycle.
-    // ~50 records/page, newest first — 3 pages comfortably covers one poll
-    // interval's worth of new filings across all companies.
+    // ~50 records/page, newest first. 1 page covers latest announcements.
     nseGlobalPages:
 
         Number(
+            process.env.NSE_PAGES
+            ||
             process.env.NSE_GLOBAL_PAGES
             ||
-            3
+            1
         ),
 
     maxRecords:

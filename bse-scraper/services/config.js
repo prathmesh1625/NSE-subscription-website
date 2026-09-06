@@ -11,15 +11,11 @@ function num(value, fallback) {
 
 module.exports = {
 
-    // Poll cadence. BSE disseminates a lot of filings minutes before the same
-    // document shows up on NSE, so this service runs a much tighter loop than
-    // the NSE scraper's 20s cycle — that head start is the whole point of it.
-    interval: num(process.env.BSE_INTERVAL, 8000),
+    // Poll cadence in ms.
+    interval: num(process.env.BSE_POLL_INTERVAL_MS, num(process.env.BSE_INTERVAL, 20000)),
 
-    // Newest-first pages (50 rows each) to pull per cycle. Paging stops early
-    // as soon as a page holds nothing newer than the previous cycle's
-    // high-water mark, so the steady-state cost is one request per cycle.
-    maxPages: num(process.env.BSE_MAX_PAGES, 6),
+    // Newest-first pages (50 rows each) to pull per cycle. Page 1 covers the latest filings.
+    maxPages: num(process.env.BSE_PAGES, num(process.env.BSE_MAX_PAGES, 1)),
 
     // Concurrent in-flight requests to BSE's API.
     requestLimit: num(process.env.BSE_REQUEST_LIMIT, 4),
