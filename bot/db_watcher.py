@@ -991,6 +991,26 @@ _summary_attempts = {}
 _summary_attempts_lock = threading.Lock()
 
 
+def _is_too_old_to_deliver(age_seconds) -> bool:
+    """
+    True when a filing has aged past MAX_DELIVERY_AGE_SEC and should be retired
+    rather than delivered.
+
+    Fails OPEN in every uncertain case — disabled by config, an unknown age, an
+    unparseable one — because the caller marks a suppressed filing as sent and
+    that cannot be undone. The guard suppresses on evidence, never on doubt.
+    """
+    limit = getattr(config, "MAX_DELIVERY_AGE_SEC", 0)
+    if not limit or limit <= 0:
+        return False
+    if age_seconds is None:
+        return False
+    try:
+        return int(age_seconds) > int(limit)
+    except (TypeError, ValueError):
+        return False
+
+
 def _should_defer_for_summary(filing_id, age_seconds) -> bool:
     """
     True if this filing should be held back — NOT sent, NOT marked notified —
@@ -1718,6 +1738,7 @@ def process_new_filings():
     # This removes repeated PostgreSQL lookups when several filings for the
     # same company arrive together, without keeping stale data between polls.
     subscriber_cache = {}
+    retired = []
 
     # ── Phase 1: resolve subscribers / drop undeliverable filings ────────
     phase1_started = time.monotonic()
@@ -1756,6 +1777,18 @@ def process_new_filings():
             mark_notified_in_pg(filing_id)
             continue
 
+        # Too old to be worth delivering — retire it instead of sending.
+        # Same bookkeeping as the branch above: marked sent for its current
+        # subscribers so the backfill does not pick it up either, and marked
+        # notified upstream so it stops returning on every poll.
+        if _is_too_old_to_deliver(filing.get("age_seconds")):
+            retired.append((symbol, filing.get("age_seconds")))
+            file_key = os.path.basename(file_path).strip()
+            for phone in subscribers:
+                bot_db.mark_filing_sent(phone, file_key)
+            mark_notified_in_pg(filing_id)
+            continue
+
         jobs.append({
             "filing_id":    filing_id,
             "symbol":       symbol,
@@ -1769,6 +1802,14 @@ def process_new_filings():
             "subscribers":  subscribers,
             "file_key":     os.path.basename(file_path).strip(),
         })
+
+    if retired:
+        oldest = max(a for _, a in retired if a is not None) if any(
+            a is not None for _, a in retired) else "?"
+        print(f"🗄️  Retired {len(retired)} filing(s) older than "
+              f"{config.MAX_DELIVERY_AGE_SEC}s without sending "
+              f"(oldest {oldest}s): "
+              f"{', '.join(sorted({sym for sym, _ in retired}))}")
 
     _timing("phase 1", phase1_started, jobs=len(jobs),
             unique_symbols=len(subscriber_cache))

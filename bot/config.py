@@ -73,6 +73,23 @@ SUMMARY_TIMEOUT_SEC = min(max(_summary_timeout_env, 20), 35)
 SUMMARY_RETRY_ATTEMPTS    = min(max(int(os.environ.get("SUMMARY_RETRY_ATTEMPTS", 1)), 0), 1)
 SUMMARY_RETRY_MAX_AGE_SEC = min(max(int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SEC", 75)), 45), 75)
 
+# Oldest a filing may be and still be delivered by the LIVE dispatch, in
+# seconds since the scraper stored it (the row's age_seconds).
+#
+# The live path delivers within ~60s of ingestion, and the summary retry above
+# is bounded at 75s, so anything we have been sitting on for a quarter of an
+# hour was never going to arrive usefully — a subscriber reading a "new" alert
+# about something that filed hours ago is worse than not being told. Such a
+# filing is RETIRED: marked sent for its current subscribers and marked
+# notified upstream, so it neither goes out nor comes back every poll.
+#
+# This also covers the first boot after a fix to the live dispatch, where a
+# whole window of filings would otherwise land at once.
+#
+# Set to 0 to disable and deliver at any age. An age that cannot be determined
+# is always delivered — the guard suppresses on evidence, never on doubt.
+MAX_DELIVERY_AGE_SEC = int(os.environ.get("MAX_DELIVERY_AGE_SEC", 900))
+
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
 # Kept at 4 to avoid LLM/API contention during announcement bursts
