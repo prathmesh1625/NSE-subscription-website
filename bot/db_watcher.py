@@ -82,18 +82,44 @@ def ensure_schema():
 
 
 def _dedup_by_filename(rows):
-    """Keep only the first row per unique PDF filename."""
+    """
+    Keep only the first row per unique PDF filename.
+
+    Reads file_path FIRST, local_path second. fetch_new_filings() selects
+    `local_path AS file_path` and then rewrites that value to the resolved
+    absolute path, so a live row carries file_path and has NO local_path key
+    at all. Keying on local_path alone therefore computed "" for every live
+    row and the `if not key` guard below dropped the ENTIRE batch — the live
+    dispatch silently delivered nothing and every alert fell through to the
+    120s backfill, which is where the multi-minute delivery came from.
+
+    local_path is still read for the backfill-shaped rows and for the
+    positional-tuple fallback just below, which name the column that way.
+    """
     seen   = []
     unique = []
+    dropped_no_key = 0
     for row in rows:
         if not isinstance(row, dict):
             keys = ("id", "title", "local_path", "announcement_time")
             row  = dict(zip(keys, row))
-        key = os.path.basename((row.get("local_path") or "").strip())
-        if not key or key in seen:
+        path = row.get("file_path") or row.get("local_path") or ""
+        key  = os.path.basename(path.strip())
+        if not key:
+            dropped_no_key += 1
+            continue
+        if key in seen:
             continue
         seen.append(key)
         unique.append(row)
+
+    # Dropping everything means the rows are not the shape this function
+    # expects, not that there was nothing to send. That looked identical to an
+    # idle poll in the logs, which is how the above went unnoticed.
+    if rows and not unique:
+        print(f"⚠️  _dedup_by_filename dropped ALL {len(rows)} filing(s) "
+              f"({dropped_no_key} with no usable path key) — check the row "
+              f"shape; the live dispatch will deliver nothing this poll.")
     return unique
 
 
@@ -934,12 +960,55 @@ def _full_caption(company, symbol, filing_type, file_path, raw_time,
     return caption
 
 
+def _within_summary_retry_window(raw_time) -> bool:
+    """
+    True while the live dispatch may still re-summarise a filing of this age.
+
+    Used by the backfill to stay off filings the live path is holding back.
+    Returns False when the age can't be determined, so an unparseable
+    timestamp still gets delivered rather than being suppressed forever.
+    """
+    if raw_time is None:
+        return False
+    try:
+        if isinstance(raw_time, str):
+            parsed = datetime.fromisoformat(raw_time)
+        else:
+            parsed = raw_time
+        now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+        age = (now - parsed).total_seconds()
+    except Exception:
+        return False
+    limit = getattr(config, "SUMMARY_RETRY_MAX_AGE_SEC", 75)
+    return 0 <= age < limit
+
+
 # Per-filing count of failed summary attempts, for the live dispatch path only.
 # Deliberately in-process and not persisted: it exists to ride out a transient
 # LLM error over the next few polls, and SUMMARY_RETRY_MAX_AGE_SEC is what
 # bounds the filing after a restart clears this.
 _summary_attempts = {}
 _summary_attempts_lock = threading.Lock()
+
+
+def _is_too_old_to_deliver(age_seconds) -> bool:
+    """
+    True when a filing has aged past MAX_DELIVERY_AGE_SEC and should be retired
+    rather than delivered.
+
+    Fails OPEN in every uncertain case — disabled by config, an unknown age, an
+    unparseable one — because the caller marks a suppressed filing as sent and
+    that cannot be undone. The guard suppresses on evidence, never on doubt.
+    """
+    limit = getattr(config, "MAX_DELIVERY_AGE_SEC", 0)
+    if not limit or limit <= 0:
+        return False
+    if age_seconds is None:
+        return False
+    try:
+        return int(age_seconds) > int(limit)
+    except (TypeError, ValueError):
+        return False
 
 
 def _should_defer_for_summary(filing_id, age_seconds) -> bool:
@@ -1669,6 +1738,7 @@ def process_new_filings():
     # This removes repeated PostgreSQL lookups when several filings for the
     # same company arrive together, without keeping stale data between polls.
     subscriber_cache = {}
+    retired = []
 
     # ── Phase 1: resolve subscribers / drop undeliverable filings ────────
     phase1_started = time.monotonic()
@@ -1707,6 +1777,18 @@ def process_new_filings():
             mark_notified_in_pg(filing_id)
             continue
 
+        # Too old to be worth delivering — retire it instead of sending.
+        # Same bookkeeping as the branch above: marked sent for its current
+        # subscribers so the backfill does not pick it up either, and marked
+        # notified upstream so it stops returning on every poll.
+        if _is_too_old_to_deliver(filing.get("age_seconds")):
+            retired.append((symbol, filing.get("age_seconds")))
+            file_key = os.path.basename(file_path).strip()
+            for phone in subscribers:
+                bot_db.mark_filing_sent(phone, file_key)
+            mark_notified_in_pg(filing_id)
+            continue
+
         jobs.append({
             "filing_id":    filing_id,
             "symbol":       symbol,
@@ -1720,6 +1802,14 @@ def process_new_filings():
             "subscribers":  subscribers,
             "file_key":     os.path.basename(file_path).strip(),
         })
+
+    if retired:
+        oldest = max(a for _, a in retired if a is not None) if any(
+            a is not None for _, a in retired) else "?"
+        print(f"🗄️  Retired {len(retired)} filing(s) older than "
+              f"{config.MAX_DELIVERY_AGE_SEC}s without sending "
+              f"(oldest {oldest}s): "
+              f"{', '.join(sorted({sym for sym, _ in retired}))}")
 
     _timing("phase 1", phase1_started, jobs=len(jobs),
             unique_symbols=len(subscriber_cache))
@@ -2011,9 +2101,27 @@ def deliver_backfill_for_subscribers():
 
                     # One message: exchange time + AI summary (cached after the
                     # first build, so repeated backfill passes are cheap).
-                    caption = _full_caption(name, symbol, row.get("title") or "New Filing",
-                                            file_path, row['announcement_time'],
-                                            row.get("pdf_url") or "")
+                    caption, summary_ok = _full_caption_ex(
+                        name, symbol, row.get("title") or "New Filing",
+                        file_path, row['announcement_time'],
+                        row.get("pdf_url") or "")
+
+                    # Don't burn a young filing on a failed summary.
+                    #
+                    # This query does NOT filter on is_notified, so the backfill
+                    # sees filings the live dispatch is deliberately holding back
+                    # to re-summarise. Sending here would win that race and bake
+                    # the "summary isn't available" caption in permanently —
+                    # mark_filing_sent() below blocks any later re-send. Leave
+                    # anything still inside the live retry window alone; the next
+                    # pass picks it up if the live path never manages it.
+                    if not summary_ok and _within_summary_retry_window(
+                        row['announcement_time']
+                    ):
+                        print(f"⏳ [backfill] Summary unavailable for {symbol} "
+                              f"'{row.get('title')}' and it is still within the "
+                              f"live retry window — leaving it for now.")
+                        continue
 
                     # Same symbol+period dedup as process_new_filings — the
                     # backfill window can contain several PDFs for one results
