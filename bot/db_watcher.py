@@ -960,6 +960,29 @@ def _full_caption(company, symbol, filing_type, file_path, raw_time,
     return caption
 
 
+def _within_summary_retry_window(raw_time) -> bool:
+    """
+    True while the live dispatch may still re-summarise a filing of this age.
+
+    Used by the backfill to stay off filings the live path is holding back.
+    Returns False when the age can't be determined, so an unparseable
+    timestamp still gets delivered rather than being suppressed forever.
+    """
+    if raw_time is None:
+        return False
+    try:
+        if isinstance(raw_time, str):
+            parsed = datetime.fromisoformat(raw_time)
+        else:
+            parsed = raw_time
+        now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+        age = (now - parsed).total_seconds()
+    except Exception:
+        return False
+    limit = getattr(config, "SUMMARY_RETRY_MAX_AGE_SEC", 75)
+    return 0 <= age < limit
+
+
 # Per-filing count of failed summary attempts, for the live dispatch path only.
 # Deliberately in-process and not persisted: it exists to ride out a transient
 # LLM error over the next few polls, and SUMMARY_RETRY_MAX_AGE_SEC is what
@@ -2037,9 +2060,27 @@ def deliver_backfill_for_subscribers():
 
                     # One message: exchange time + AI summary (cached after the
                     # first build, so repeated backfill passes are cheap).
-                    caption = _full_caption(name, symbol, row.get("title") or "New Filing",
-                                            file_path, row['announcement_time'],
-                                            row.get("pdf_url") or "")
+                    caption, summary_ok = _full_caption_ex(
+                        name, symbol, row.get("title") or "New Filing",
+                        file_path, row['announcement_time'],
+                        row.get("pdf_url") or "")
+
+                    # Don't burn a young filing on a failed summary.
+                    #
+                    # This query does NOT filter on is_notified, so the backfill
+                    # sees filings the live dispatch is deliberately holding back
+                    # to re-summarise. Sending here would win that race and bake
+                    # the "summary isn't available" caption in permanently —
+                    # mark_filing_sent() below blocks any later re-send. Leave
+                    # anything still inside the live retry window alone; the next
+                    # pass picks it up if the live path never manages it.
+                    if not summary_ok and _within_summary_retry_window(
+                        row['announcement_time']
+                    ):
+                        print(f"⏳ [backfill] Summary unavailable for {symbol} "
+                              f"'{row.get('title')}' and it is still within the "
+                              f"live retry window — leaving it for now.")
+                        continue
 
                     # Same symbol+period dedup as process_new_filings — the
                     # backfill window can contain several PDFs for one results
