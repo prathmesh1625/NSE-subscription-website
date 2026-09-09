@@ -78,6 +78,17 @@ SUMMARY_RETRY_MAX_AGE_SEC = min(max(int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SE
 # Kept at 4 to avoid LLM/API contention during announcement bursts
 SUMMARY_WORKERS  = min(max(int(os.environ.get("SUMMARY_WORKERS", 4)), 2), 6)
 
+# How many subscribers of ONE filing are messaged concurrently. Delivery used to
+# walk the subscriber list one phone at a time, so each recipient waited for
+# every WhatsApp round-trip before theirs — the 15th subscriber of a company got
+# their alert minutes after the 1st, even though the scraper had the PDF in
+# under 60s. Sends are independent per phone, so they now fan out across this
+# many threads and the whole list lands within seconds of the first.
+# Bounded: high enough that a large company clears well inside the 60s budget,
+# low enough to stay under Meta's per-number throughput and to keep the shared
+# SQLite lock in database.py from becoming the new queue.
+DELIVERY_WORKERS = min(max(int(os.environ.get("DELIVERY_WORKERS", 12)), 1), 32)
+
 # LLM used for the AI summary (in-process via output.py / LangChain).
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
 SUMMARY_MODEL    = os.environ.get("SUMMARY_MODEL", "gpt-4o-mini")

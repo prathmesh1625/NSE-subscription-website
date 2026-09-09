@@ -809,6 +809,23 @@ _caption_pool = ThreadPoolExecutor(
 )
 
 
+# ── Parallel subscriber delivery ─────────────────────────────────────────────
+# Every subscriber of a filing is messaged on this pool instead of in a serial
+# loop. One WhatsApp round-trip is ~1-3s, so a 40-subscriber company used to
+# take minutes end-to-end and the delay grew with each position in the list.
+# The sends are independent — dedup bookkeeping is keyed per (phone, filing) and
+# database.py serialises its own writes — so fanning them out is safe and turns
+# that walk into roughly ceil(N / DELIVERY_WORKERS) round-trips.
+#
+# Kept SEPARATE from _caption_pool on purpose: summaries are slow and CPU/LLM
+# bound, deliveries are short and network bound. Sharing one pool would let a
+# burst of summaries starve the delivery threads and put the delay straight back.
+_delivery_pool = ThreadPoolExecutor(
+    max_workers=getattr(config, "DELIVERY_WORKERS", 12),
+    thread_name_prefix="delivery",
+)
+
+
 # base62 alphabet for compact short codes (like equisense.ai/t/XWFNMh).
 _B62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -1607,11 +1624,26 @@ def _try_send(phone, file_path, caption, file_key, filing_id=None,
 def process_new_filings():
     """
     Fetch new filings → build (exchange time + AI summary) captions for the
-    whole batch CONCURRENTLY → deliver one WhatsApp message each.
+    whole batch CONCURRENTLY → deliver one WhatsApp message each, to every
+    subscriber of a filing CONCURRENTLY.
 
     Building captions in parallel means a burst of N filings takes about as long
     as ONE summary, not N — so every PDF lands with its summary within ~1 minute
     instead of the later ones queuing for minutes.
+
+    Delivery is parallel for the same reason. Sending to subscribers one at a
+    time made a recipient's wait proportional to their position in the list, so
+    a company with a few dozen subscribers spent minutes in delivery and undid
+    the sub-60s scrape. The per-filing subscriber list now goes out on
+    _delivery_pool at once (see _deliver_to).
+
+    Filings themselves are still handled ONE AT A TIME here, deliberately. The
+    results-period and cross-exchange dedup below work by having an earlier
+    filing record what it sent before a later one checks — the NSE and BSE
+    copies of one document, and the several PDFs of one results event, routinely
+    arrive in the SAME poll. Overlapping the jobs would let both copies pass the
+    check before either marked, and subscribers would get the duplicate.
+    Parallelism belongs inside a filing, where recipients are independent.
     """
     process_started = time.monotonic()
     fetch_started = time.monotonic()
@@ -1771,16 +1803,27 @@ def process_new_filings():
         print(f"🔑 {j['symbol']} [{j.get('exchange') or '?'}] "
               f"title={j['filing_type']!r} keys={exchange_keys or '(none)'}")
 
-        all_sent = True
-        for phone in j["subscribers"]:
+        def _deliver_to(phone, j=j, caption=caption, period_key=period_key,
+                        exchange_keys=exchange_keys):
+            """
+            Deliver this filing to ONE subscriber. Runs on _delivery_pool, once
+            per phone, all at the same time.
+
+            Everything here is scoped to a single phone: the dedup reads and
+            writes are keyed by (phone, ...), and database.py guards its own
+            connection, so concurrent recipients cannot affect each other's
+            outcome. Returns True when the subscriber is settled (delivered, or
+            deliberately skipped as a duplicate) and False when the send failed
+            and the filing must be retried on a later poll.
+            """
             if bot_db.is_filing_sent(phone, j["file_key"]):
                 print(f"ℹ️  Already sent filing {j['file_key']} to {phone}, skipping.")
-                continue
+                return True
             if period_key and bot_db.is_result_period_sent(phone, j["symbol"], period_key):
                 print(f"ℹ️  Already sent {j['symbol']} results for '{period_key}' to {phone} "
                       f"(different filing PDF) — skipping duplicate.")
                 bot_db.mark_filing_sent(phone, j["file_key"])
-                continue
+                return True
             hit = next((k for k in exchange_keys
                         if bot_db.is_cross_exchange_sent(phone, k, j["raw_time"])), None)
             if hit:
@@ -1788,7 +1831,7 @@ def process_new_filings():
                       f"{phone} from the other exchange — skipping duplicate "
                       f"(matched {hit}).")
                 bot_db.mark_filing_sent(phone, j["file_key"])
-                continue
+                return True
             # Only marks sent on confirmed success; queues on failure.
             send_started = time.monotonic()
             ok = _try_send(phone, j["file_path"], caption, j["file_key"],
@@ -1802,8 +1845,31 @@ def process_new_filings():
                     bot_db.mark_cross_exchange_sent(
                         phone, k, j.get("exchange") or "", j["raw_time"]
                     )
-            if not ok:
+            return ok
+
+        # Fan the subscriber list out instead of walking it. Position in the
+        # list no longer costs a recipient anything: everyone's WhatsApp
+        # round-trip is in flight at once, so the last subscriber is served
+        # within a round-trip or two of the first rather than N of them.
+        fanout_started = time.monotonic()
+        all_sent = True
+        send_futures = {
+            _delivery_pool.submit(_deliver_to, phone): phone
+            for phone in j["subscribers"]
+        }
+        for future in as_completed(send_futures):
+            phone = send_futures[future]
+            try:
+                if not future.result():
+                    all_sent = False
+            except Exception as e:
+                # A raising send must not abandon the rest of the list, which is
+                # what an exception mid-loop used to do. Record the failure and
+                # let the unmarked filing come back on the next poll.
+                print(f"❌ Delivery to {phone} failed for {j['file_key']}: {e}")
                 all_sent = False
+        _timing("subscriber fan-out", fanout_started, symbol=j["symbol"],
+                subscribers=len(j["subscribers"]), all_sent=all_sent)
 
         # Mark notified in PG only when EVERY subscriber got it. Otherwise the
         # filing stays is_notified=FALSE and is retried on the next poll for
