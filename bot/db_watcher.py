@@ -82,18 +82,44 @@ def ensure_schema():
 
 
 def _dedup_by_filename(rows):
-    """Keep only the first row per unique PDF filename."""
+    """
+    Keep only the first row per unique PDF filename.
+
+    Reads file_path FIRST, local_path second. fetch_new_filings() selects
+    `local_path AS file_path` and then rewrites that value to the resolved
+    absolute path, so a live row carries file_path and has NO local_path key
+    at all. Keying on local_path alone therefore computed "" for every live
+    row and the `if not key` guard below dropped the ENTIRE batch — the live
+    dispatch silently delivered nothing and every alert fell through to the
+    120s backfill, which is where the multi-minute delivery came from.
+
+    local_path is still read for the backfill-shaped rows and for the
+    positional-tuple fallback just below, which name the column that way.
+    """
     seen   = []
     unique = []
+    dropped_no_key = 0
     for row in rows:
         if not isinstance(row, dict):
             keys = ("id", "title", "local_path", "announcement_time")
             row  = dict(zip(keys, row))
-        key = os.path.basename((row.get("local_path") or "").strip())
-        if not key or key in seen:
+        path = row.get("file_path") or row.get("local_path") or ""
+        key  = os.path.basename(path.strip())
+        if not key:
+            dropped_no_key += 1
+            continue
+        if key in seen:
             continue
         seen.append(key)
         unique.append(row)
+
+    # Dropping everything means the rows are not the shape this function
+    # expects, not that there was nothing to send. That looked identical to an
+    # idle poll in the logs, which is how the above went unnoticed.
+    if rows and not unique:
+        print(f"⚠️  _dedup_by_filename dropped ALL {len(rows)} filing(s) "
+              f"({dropped_no_key} with no usable path key) — check the row "
+              f"shape; the live dispatch will deliver nothing this poll.")
     return unique
 
 
