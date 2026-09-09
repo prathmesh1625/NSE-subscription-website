@@ -826,6 +826,17 @@ _delivery_pool = ThreadPoolExecutor(
 )
 
 
+# One worker per COMPANY in a burst. These tasks mostly wait on _delivery_pool
+# futures, so this pool is about overlapping companies, not about doing work —
+# which is why it is separate from _delivery_pool. Sharing one pool would let
+# these waiters hold every thread while the sends they are waiting for have
+# nowhere to run, and the poll would deadlock rather than merely be slow.
+_symbol_pool = ThreadPoolExecutor(
+    max_workers=getattr(config, "SYMBOL_WORKERS", 8),
+    thread_name_prefix="symbol",
+)
+
+
 # base62 alphabet for compact short codes (like equisense.ai/t/XWFNMh).
 _B62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -1752,8 +1763,11 @@ def process_new_filings():
     _timing("caption collection", caption_started, jobs=len(jobs),
              completed=len(caption_results))
 
-    # Delivery order remains deterministic even though caption generation is not.
-    for j in jobs:
+    def _process_job(j):
+        """
+        Deliver ONE filing to its whole subscriber list. Called once per filing;
+        filings of DIFFERENT symbols run concurrently (see the dispatch below).
+        """
         caption, summary_ok = caption_results.get(
             j["file_key"],
             (_caption_with_time(
@@ -1773,7 +1787,7 @@ def process_new_filings():
         ):
             print(f"⏳ Summary unavailable for {j['symbol']} '{j['filing_type']}' — "
                   f"holding delivery for the next poll.")
-            continue
+            return
 
         if not summary_ok:
             print(f"⚠️  Summary still unavailable for {j['symbol']} "
@@ -1877,7 +1891,49 @@ def process_new_filings():
         if all_sent:
             mark_notified_in_pg(j["filing_id"])
 
-    _timing("delivery phase", delivery_phase_started, jobs=len(jobs))
+    # Filings are grouped by SYMBOL and the groups run at the same time, while
+    # each group is still walked in order.
+    #
+    # That split is exactly what the dedup allows. Both suppression keys are
+    # symbol-prefixed — _cross_exchange_key() returns "<SYMBOL>|<subject>" and
+    # the fingerprint key is "<SYMBOL>|fp:<hash>" — and the results-period key
+    # is looked up as (phone, symbol, period). So two DIFFERENT symbols can
+    # never read or write the same key and cannot affect each other, whereas
+    # two filings of the SAME symbol are precisely the pair that must not
+    # overlap: the NSE and BSE copies of one document, and the several PDFs of
+    # one results event, arrive together and rely on the earlier one recording
+    # before the later one checks.
+    #
+    # Before this, a burst of N filings paid N delivery phases end to end, so
+    # the last company's subscribers waited out every company ahead of it —
+    # the remaining source of multi-minute alerts once the per-subscriber walk
+    # was gone.
+    groups = {}
+    for j in jobs:
+        groups.setdefault(j["symbol"], []).append(j)
+
+    def _process_group(group):
+        for j in group:
+            _process_job(j)
+
+    # _symbol_pool must NOT be _delivery_pool: these tasks block on futures from
+    # that pool, and running both on one pool would let the waiters occupy every
+    # thread while the sends they wait for sit unstarted — a deadlock.
+    group_futures = {
+        _symbol_pool.submit(_process_group, group): symbol
+        for symbol, group in groups.items()
+    }
+    for future in as_completed(group_futures):
+        symbol = group_futures[future]
+        try:
+            future.result()
+        except Exception as e:
+            # One company's failure must not take the rest of the poll with it.
+            # The filing stays is_notified=FALSE and returns on the next poll.
+            print(f"❌ Delivery failed for {symbol}: {e}")
+
+    _timing("delivery phase", delivery_phase_started, jobs=len(jobs),
+            symbol_groups=len(groups))
     _timing("poll total", process_started,
             filings=len(filings), jobs=len(jobs))
 

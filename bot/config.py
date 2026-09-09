@@ -76,7 +76,14 @@ SUMMARY_RETRY_MAX_AGE_SEC = min(max(int(os.environ.get("SUMMARY_RETRY_MAX_AGE_SE
 # How many AI summaries to generate concurrently. A burst of filings is built in
 # parallel so later PDFs don't wait behind earlier summaries.
 # Kept at 4 to avoid LLM/API contention during announcement bursts
-SUMMARY_WORKERS  = min(max(int(os.environ.get("SUMMARY_WORKERS", 4)), 2), 6)
+# Ceiling raised to 16 (default deliberately UNCHANGED at 4). With delivery
+# parallel, this stage is now the binding constraint on a burst of uncached
+# filings: N filings cost ceil(N / SUMMARY_WORKERS) x up to SUMMARY_TIMEOUT_SEC,
+# so 30 new filings at 4 workers is 8 rounds — minutes, before a single message
+# is sent. The old hard cap of 6 meant that could not be tuned without a code
+# change. Raise it via the env var while watching for LLM 429s, which is the
+# contention the default is protecting against.
+SUMMARY_WORKERS  = min(max(int(os.environ.get("SUMMARY_WORKERS", 4)), 2), 16)
 
 # How many subscribers of ONE filing are messaged concurrently. Delivery used to
 # walk the subscriber list one phone at a time, so each recipient waited for
@@ -84,10 +91,25 @@ SUMMARY_WORKERS  = min(max(int(os.environ.get("SUMMARY_WORKERS", 4)), 2), 6)
 # their alert minutes after the 1st, even though the scraper had the PDF in
 # under 60s. Sends are independent per phone, so they now fan out across this
 # many threads and the whole list lands within seconds of the first.
-# Bounded: high enough that a large company clears well inside the 60s budget,
-# low enough to stay under Meta's per-number throughput and to keep the shared
-# SQLite lock in database.py from becoming the new queue.
-DELIVERY_WORKERS = min(max(int(os.environ.get("DELIVERY_WORKERS", 12)), 1), 32)
+# Sized against the 60s budget rather than a guess: this is the ONE cap on how
+# many WhatsApp calls are in flight across the whole poll, so a burst of
+# S subscribers takes about S / DELIVERY_WORKERS round-trips no matter how the
+# filings are grouped. At 24 and a ~1-1.5s round-trip that is ~16-24 messages a
+# second, so even a heavy results-day burst clears inside the minute.
+# Still well under WhatsApp Cloud API's default 80 messages/second, and the
+# shared SQLite lock in database.py sees only a few short writes per send.
+DELIVERY_WORKERS = min(max(int(os.environ.get("DELIVERY_WORKERS", 24)), 1), 64)
+
+# How many COMPANIES are delivered at the same time. A results-day burst brings
+# in many symbols at once, and handling them one after another made the last
+# company's subscribers wait out every company ahead of it. Filings of one
+# symbol still go in order (the NSE/BSE duplicate suppression depends on it);
+# different symbols cannot collide, because every suppression key is
+# symbol-prefixed.
+#
+# This is a fan-out width, not a worker count — these threads spend their time
+# waiting on DELIVERY_WORKERS, which stays the real throughput limit.
+SYMBOL_WORKERS = min(max(int(os.environ.get("SYMBOL_WORKERS", 8)), 1), 32)
 
 # LLM used for the AI summary (in-process via output.py / LangChain).
 SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai")
